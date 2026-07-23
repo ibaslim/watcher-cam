@@ -1,0 +1,81 @@
+# MediaMTX configuration — paths are registered at runtime by the backend
+# via the control API (see backend/app/services/mediamtx.py). Keep this file
+# limited to protocol / server / auth settings.
+
+logLevel: info
+logDestinations: [stdout]
+
+# --- Auth ---
+# The API lives on the compose network and is only reachable by the backend
+# service. Publishing/reading are allowed to anyone on the LAN (dashboard).
+# Tighten this before exposing MediaMTX to the public internet.
+authMethod: internal
+authInternalUsers:
+  - user: any
+    pass:
+    ips: []
+    permissions:
+      - action: publish
+      - action: read
+      - action: playback
+      - action: api
+      - action: metrics
+      - action: pprof
+
+# --- Control API (backend registers paths here) ---
+api: yes
+apiAddress: :9997
+
+# --- Playback protocols for the browser ---
+webrtc: yes
+webrtcAddress: :8889
+webrtcAllowOrigins: ['*']
+webrtcICEServers2:
+  - url: stun:stun.l.google.com:19302
+# Single UDP port for WebRTC ICE — simpler firewall / docker port mapping.
+webrtcLocalUDPAddress: :8189
+# Extra hosts advertised in ICE candidates. Needed for access from outside the
+# LAN: without the server's public IP/hostname here, MediaMTX only offers its
+# private address and remote browsers can't reach the media. Override via the
+# MTX_WEBRTCADDITIONALHOSTS env var (set MEDIAMTX_PUBLIC_HOST in .env) rather
+# than editing this list. For strict/symmetric NAT, also add a TURN server to
+# webrtcICEServers2 above.
+#webrtcAdditionalHosts: []
+
+
+webrtcAdditionalHosts:
+  - 135.181.70.254
+hls: yes
+hlsAddress: :8888
+hlsAllowOrigins: ['*']
+hlsVariant: lowLatency
+hlsSegmentCount: 7
+hlsSegmentDuration: 1s
+
+# --- Inbound protocols ---
+# RTSP accepts pushes from the demo webcam publisher (scripts/webcam.sh) and
+# could also accept pushes from other local sources. Real cameras are pulled
+# by MediaMTX (configured dynamically by the backend), not pushed.
+rtsp: yes
+rtspAddress: :8554
+rtmp: no
+srt: no
+
+# --- Defaults applied to every path created via the API ---
+pathDefaults:
+  sourceOnDemand: yes
+  # Allow slow cameras (RTSP handshake + first keyframe) more time before the
+  # first viewer gives up.
+  sourceOnDemandStartTimeout: 15s
+  # Keep the camera pull alive for a while after the last viewer disconnects so
+  # a page reload or a quick hop to another tab doesn't trigger a cold restart.
+  # (With the dashboard keeping tiles mounted, a reader normally stays connected
+  # the whole session anyway — this just covers full reloads / brief drops.)
+  sourceOnDemandCloseAfter: 60s
+
+# --- Static paths (declared here, not via the API) ---
+paths:
+  # Demo path used by scripts/webcam.sh — publisher pushes, browser reads.
+  demo-webcam:
+    source: publisher
+    sourceOnDemand: no

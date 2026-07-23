@@ -1,0 +1,77 @@
+services:
+  mediamtx:
+    image: bluenviron/mediamtx:latest
+    container_name: cs-mediamtx
+    restart: unless-stopped
+    volumes:
+      - ./mediamtx/mediamtx.yml:/mediamtx.yml:ro
+    environment:
+      - MTX_LOGLEVEL=info
+      # For access from outside the LAN (port-forwarding / NAT): set
+      # MEDIAMTX_PUBLIC_HOST to the server's public IP or hostname so WebRTC
+      # advertises a reachable ICE candidate. Blank = LAN-only (auto-detected
+      # local addresses). Also forward TCP 8889 + UDP 8189 on the router.
+      - MTX_WEBRTCADDITIONALHOSTS=${MEDIAMTX_PUBLIC_HOST:-}
+    ports:
+      # Browser-facing playback
+      - "${MEDIAMTX_WEBRTC_PORT:-8889}:8889"
+      - "${MEDIAMTX_HLS_PORT:-8888}:8888"
+      # Control API (backend uses it via Docker DNS, not this mapping)
+      - "${MEDIAMTX_API_PORT:-9997}:9997"
+      # RTSP publish (used by scripts/webcam.sh to push the laptop camera)
+      - "8554:8554"
+      # WebRTC ICE — MediaMTX uses a single UDP mux port by default (8189)
+      - "8189:8189/udp"
+      # --- HIKVISION ISUP PORT ENTRYWAYS (UPDATED TO BYPASS FIREWALL) ---
+     # - "443:443/tcp" # Handles the initial camera registration/handshake over HTTPS port
+    #  - "443:443/udp" # Handles incoming video stream traffic segments over HTTPS port
+
+  backend:
+    build: ./backend
+    container_name: cs-backend
+    restart: unless-stopped
+    env_file: .env
+    environment:
+      # Reach MediaMTX by service name on the compose network.
+      MEDIAMTX_API_HOST: mediamtx
+    ports:
+      - "${BACKEND_PORT:-8100}:8000"
+    volumes:
+      - ./data:/app/data
+    depends_on:
+      - mediamtx
+
+  frontend:
+    build:
+      context: ./frontend
+      args:
+        # Leave blank to auto-target the host the dashboard is opened from
+        # (works for localhost, LAN IP, and port-forwarded access). Set explicit
+        # URLs only for reverse-proxy / HTTPS deployments.
+        VITE_API_URL: ${VITE_API_URL:-}
+        VITE_MEDIAMTX_URL: ${VITE_MEDIAMTX_URL:-}
+    container_name: cs-frontend
+    restart: unless-stopped
+    ports:
+      - "5173:80"
+    depends_on:
+      - backend
+
+  # Face-recognition service: exposes HTTP API for photo-upload embedding, and
+  # supervises one async worker per camera (camera list pulled from the
+  # backend's /api/cameras/_internal endpoint, refreshed every ~30 s).
+  detector:
+    build: ./detector
+    container_name: cs-detector
+    restart: unless-stopped
+    env_file: .env
+    environment:
+      BACKEND_URL: http://backend:8000
+      SNAPSHOT_DIR: /app/data/snapshots
+      # Prefer stable TCP RTSP pulls and sensible timeouts when many NVR
+      # channels are opened by OpenCV/FFmpeg.
+      OPENCV_FFMPEG_CAPTURE_OPTIONS: rtsp_transport;tcp|stimeout;10000000|max_delay;5000000
+    volumes:
+      - ./data:/app/data
+    depends_on:
+      - backend

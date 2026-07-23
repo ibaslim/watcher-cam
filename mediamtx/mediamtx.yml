@@ -1,0 +1,48 @@
+logLevel: info
+logDestinations: [stdout]
+
+# Remote cameras/NVRs can briefly stall or deliver bursty packets, especially
+# across NAT or port-forwarded internet links. These values keep MediaMTX from
+# tearing down a live source too aggressively during short RTSP hiccups.
+readTimeout: 30s
+writeTimeout: 30s
+writeQueueSize: 1024
+
+api: yes
+apiAddress: :9997
+apiAllowOrigins: ['*']
+
+authMethod: internal
+authInternalUsers:
+  - user: any
+    pass:
+    ips: []
+    permissions:
+      - action: publish
+      - action: read
+      - action: playback
+      - action: api
+      - action: metrics
+      - action: pprof
+
+rtsp: yes
+rtspAddress: :8554
+rtpAddress: :8000
+rtcpAddress: :8001
+
+hls: yes
+hlsAddress: :8888
+hlsAllowOrigins: ['*']
+
+webrtc: yes
+webrtcAddress: :8889
+webrtcAllowOrigins: ['*']
+webrtcLocalUDPAddress: :8189
+
+pathDefaults:
+  sourceOnDemand: yes
+  sourceOnDemandStartTimeout: 30s
+  sourceOnDemandCloseAfter: 120s
+  # Remote NVR/DVR streams are usually steadier over TCP. Automatic/UDP can
+  # work on a LAN but is fragile across NAT, routers, and cloud VMs.
+  rtspTransport: tcp
