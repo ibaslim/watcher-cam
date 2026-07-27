@@ -94,7 +94,7 @@ class CameraIn(BaseModel):
     username: str = ""
     password: str = ""
     channel: int = Field(101, ge=1)
-    detect: bool = False
+    detect: bool = True
     recording_enabled: bool = True
     rtsp_url_override: str = ""
 
@@ -107,7 +107,7 @@ class CameraUpdate(BaseModel):
     username: str = ""
     password: str = ""
     channel: int = Field(101, ge=1)
-    detect: bool = False
+    detect: bool = True
     recording_enabled: bool = True
     rtsp_url_override: str = ""
 

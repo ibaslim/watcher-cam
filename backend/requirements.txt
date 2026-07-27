@@ -7,3 +7,5 @@ sqlalchemy==2.0.36
 aiosmtplib==3.0.2
 xmltodict==0.14.2
 python-multipart==0.0.17
+numpy==1.26.4
+opencv-python-headless==4.10.0.84

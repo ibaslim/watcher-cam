@@ -80,7 +80,7 @@ class Camera(Base):
     username: Mapped[str] = mapped_column(String(64), default="")
     password: Mapped[str] = mapped_column(String(128), default="")
     channel: Mapped[int] = mapped_column(Integer, default=101)
-    detect: Mapped[bool] = mapped_column(Boolean, default=False)
+    detect: Mapped[bool] = mapped_column(Boolean, default=True)
     recording_enabled: Mapped[bool] = mapped_column(Boolean, default=True)
     rtsp_url_override: Mapped[str] = mapped_column(String(512), default="")
     recorder_id: Mapped[str] = mapped_column(String(64), default="")
@@ -135,6 +135,7 @@ class Event(Base):
     label: Mapped[str | None] = mapped_column(String(64), nullable=True)
     confidence: Mapped[float | None] = mapped_column(Float, nullable=True)
     snapshot_path: Mapped[str | None] = mapped_column(String(255), nullable=True)
+    entity_id: Mapped[str | None] = mapped_column(String(64), nullable=True, index=True)
     raw: Mapped[str | None] = mapped_column(Text, nullable=True)
 
     guard_id: Mapped[int | None] = mapped_column(
@@ -143,6 +144,25 @@ class Event(Base):
         index=True,
     )
     face_score: Mapped[float | None] = mapped_column(Float, nullable=True)
+
+
+class CameraClassification(Base):
+    """A cropped, per-camera gallery item for unique detections."""
+
+    __tablename__ = "camera_classifications"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    camera_id: Mapped[str] = mapped_column(String(64), index=True)
+    category: Mapped[str] = mapped_column(String(32), index=True)
+    label: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    crop_path: Mapped[str | None] = mapped_column(String(255), nullable=True)
+    entity_id: Mapped[str | None] = mapped_column(String(64), nullable=True, index=True)
+    fingerprint: Mapped[str | None] = mapped_column(String(128), nullable=True, index=True)
+    source_event_type: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    confidence: Mapped[float | None] = mapped_column(Float, nullable=True)
+    occurrence_count: Mapped[int] = mapped_column(Integer, default=1)
+    first_seen: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow, index=True)
+    last_seen: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow, index=True)
 
 
 Index("ix_events_camera_created", Event.camera_id, Event.created_at.desc())

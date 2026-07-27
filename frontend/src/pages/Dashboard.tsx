@@ -1,9 +1,9 @@
-import { Camera } from "../lib/api";
+import { Camera, EventRow } from "../lib/api";
 import { CameraTile } from "../components/CameraTile";
 
-type Props = { cameras: Camera[]; hidden?: boolean };
+type Props = { cameras: Camera[]; events: EventRow[]; hidden?: boolean };
 
-export function Dashboard({ cameras, hidden = false }: Props) {
+export function Dashboard({ cameras, events, hidden = false }: Props) {
   // Stay mounted when hidden so WebRTC tiles keep streaming between routes.
   return (
     <main className="flex-1 overflow-auto p-4 md:p-6 bg-verkada-canvas" style={hidden ? { display: "none" } : undefined}>
@@ -33,7 +33,7 @@ export function Dashboard({ cameras, hidden = false }: Props) {
         {cameras.length === 0 ? (
           <div className="col-span-full text-center py-12 text-theme-muted">No cameras configured. Add cameras from the Cameras page.</div>
         ) : (
-          cameras.map((camera) => <CameraTile key={camera.id} camera={camera} />)
+          cameras.map((camera) => <CameraTile key={camera.id} camera={camera} events={events} />)
         )}
       </div>
     </main>

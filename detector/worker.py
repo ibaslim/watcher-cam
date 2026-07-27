@@ -2,17 +2,14 @@
 
 Pipeline:
   1. Pull latest RTSP frame
-  2. Detect people with YOLO
-  3. Run face recognition for detected people
-  4. Match faces against enrolled guards
-  5. Emit:
-     - guard_present when a known guard is recognized
-     - unknown_person when a person is visible but no known guard face is matched
+  2. Detect supported objects with YOLO
+  3. Emit object events such as person, vehicle, and animal detections
 """
 
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import logging
 import threading
 import time
@@ -22,12 +19,11 @@ from pathlib import Path
 
 import cv2
 import httpx
+import numpy as np
 
 from detector.config import CameraConfig, get_settings
-from detector.face import DetectedFace, analyze
-from detector.face_bank import bank
+from detector.face import analyze
 from detector.object_detection import detect_objects
-from detector.person import PersonBox
 
 log = logging.getLogger(__name__)
 
@@ -190,9 +186,156 @@ def _capture_high_quality_snapshot(cam: CameraConfig):
 
 
 def _event_detection_category(event_type: str) -> str | None:
-    if event_type in {"unknown_person", "guard_present", "wrong_guard"}:
+    if event_type in {"person_detected", "unknown_person"}:
         return "person"
+    if event_type in {"vehicle_detected"}:
+        return "vehicle"
+    if event_type in {"animal_detected"}:
+        return "animal"
     return None
+
+
+def _image_laplacian_score(frame) -> float:
+    gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
+    return float(cv2.Laplacian(gray, cv2.CV_64F).var())
+
+
+def _face_embedding_fingerprint(embedding) -> str | None:
+    if embedding is None:
+        return None
+
+    normalized = np.asarray(embedding, dtype=np.float32)
+    norm = float(np.linalg.norm(normalized))
+    if norm <= 0.0:
+        return None
+
+    normalized = normalized / norm
+    quantized = np.clip(np.round(normalized * 63.0), 0, 127).astype(np.uint8)
+    digest = hashlib.blake2b(quantized.tobytes(), digest_size=16).hexdigest()
+    return digest
+
+
+def _should_emit_classification(*, category: str, crop_path: str | None, fingerprint: str | None) -> bool:
+    return category in {"person", "animal", "vehicle"}
+
+
+def _select_face_crop_bbox(frame, person_bbox, faces) -> tuple[tuple[int, int, int, int] | None, str | None]:
+    if frame is None or not faces:
+        return None, None
+
+    person_x1, person_y1, person_x2, person_y2 = person_bbox
+    person_w = max(1, person_x2 - person_x1)
+    person_h = max(1, person_y2 - person_y1)
+
+    best_bbox = None
+    best_face = None
+    best_score = None
+
+    for face in faces:
+        x1, y1, x2, y2 = face.bbox
+        if x2 <= x1 or y2 <= y1:
+            continue
+
+        if not _center_inside((x1, y1, x2, y2), person_bbox):
+            continue
+
+        face_w = x2 - x1
+        face_h = y2 - y1
+        face_area = face_w * face_h
+        person_area = person_w * person_h
+
+        if face_w < max(32, int(person_w * 0.22)) or face_h < max(32, int(person_h * 0.22)):
+            continue
+        if face_area < max(900, int(person_area * 0.06)):
+            continue
+
+        crop = frame[y1:y2, x1:x2]
+        if crop.size == 0:
+            continue
+
+        sharpness = _image_laplacian_score(crop)
+        if sharpness < 140.0:
+            continue
+
+        face_ratio = min(1.0, max(0.0, (face_w / max(1, face_h)) - 0.6) / 0.8)
+        face_center_x = (x1 + x2) / 2
+        face_center_y = (y1 + y2) / 2
+        person_center_x = (person_x1 + person_x2) / 2
+        person_center_y = (person_y1 + person_y2) / 2
+        center_alignment = 1.0 - min(1.0, abs(face_center_x - person_center_x) / max(1, person_w) + abs(face_center_y - person_center_y) / max(1, person_h))
+
+        score = (
+            (face_area / max(1, person_area)) * 1.4
+            + (float(getattr(face, "det_score", 0.0)) * 0.6)
+            + (sharpness / 20000.0)
+            + center_alignment * 0.6
+            + (1.0 - face_ratio) * 0.2
+        )
+        if best_score is None or score > best_score:
+            best_score = score
+            best_bbox = (x1, y1, x2, y2)
+            best_face = face
+
+    if best_bbox is None or best_face is None:
+        return None, None
+
+    return best_bbox, _face_embedding_fingerprint(getattr(best_face, "embedding", None))
+
+
+def _save_crop(frame, bbox: tuple[int, int, int, int], *, cam: CameraConfig, category: str, event_type: str, label: str | None) -> str | None:
+    if frame is None:
+        return None
+
+    x1, y1, x2, y2 = bbox
+    if x2 <= x1 or y2 <= y1:
+        return None
+
+    pad = max(12, int(round(max(x2 - x1, y2 - y1) * 0.12)))
+    x1 = max(0, x1 - pad)
+    y1 = max(0, y1 - pad)
+    x2 = min(frame.shape[1] - 1, x2 + pad)
+    y2 = min(frame.shape[0] - 1, y2 + pad)
+
+    crop = frame[y1:y2, x1:x2]
+    if crop.size == 0:
+        return None
+
+    if category == "person":
+        sharpness = _image_laplacian_score(crop)
+        if sharpness < 140.0:
+            return None
+
+    ts = datetime.utcnow()
+    filename = f"{cam.id}_{ts.strftime('%Y%m%d_%H%M%S_%f')}_{category}_crop.jpg"
+    full_path = Path(get_settings().snapshot_dir) / filename
+    full_path.parent.mkdir(parents=True, exist_ok=True)
+    ok = cv2.imwrite(str(full_path), crop)
+    if not ok:
+        return None
+
+    return filename
+
+
+def _fingerprint_for_crop(frame, bbox: tuple[int, int, int, int]) -> str | None:
+    if frame is None:
+        return None
+
+    x1, y1, x2, y2 = bbox
+    if x2 <= x1 or y2 <= y1:
+        return None
+
+    crop = frame[y1:y2, x1:x2]
+    if crop.size == 0:
+        return None
+
+    gray = cv2.cvtColor(crop, cv2.COLOR_BGR2GRAY)
+    resized = cv2.resize(gray, (8, 8), interpolation=cv2.INTER_AREA).astype(np.float32)
+    dct = cv2.dct(resized)
+    dct_low = dct[:4, :4]
+    median = float(np.median(dct_low))
+    bits = "".join("1" if value >= median else "0" for value in dct_low.flatten())
+    value = int(bits, 2)
+    return f"{value:016x}"
 
 
 def _best_snapshot_detection_bbox(
@@ -370,26 +513,11 @@ class _ObjectTracker:
         return best[1] if best else None
 
 
-def _person_has_matched_face(
-    person: PersonBox,
-    matches: list[tuple[DetectedFace, int, str, float]],
-) -> tuple[DetectedFace, int, str, float] | None:
-    for face, guard_id, guard_name, score in matches:
-        if _center_inside(face.bbox, person.bbox):
-            return face, guard_id, guard_name, score
-    return None
-
-
 async def run_camera_loop(cam: CameraConfig) -> None:
     log.info(
-        "worker starting for %s detect=%s guarded=%s assigned=%s backup=%s unknown=%s wrong=%s",
+        "worker starting for %s detect=%s",
         cam.id,
         cam.detect,
-        cam.is_guarded,
-        cam.assigned_guard_id,
-        cam.backup_guard_id,
-        cam.alert_unknown_person,
-        cam.alert_wrong_guard,
     )
 
     try:
@@ -421,11 +549,8 @@ async def _run_once(cam: CameraConfig) -> None:
 
     last_seq = -1
     last_frame_mono = time.monotonic()
-    last_face_analysis = 0.0
-    last_face_diag_log = 0.0
     detection_frame_index = 0
 
-    last_guard_heartbeat: dict[int, float] = {}
     tracker = _ObjectTracker(
         forget_sec=s.object_track_forget_sec,
         match_iou=s.object_track_match_iou,
@@ -451,191 +576,41 @@ async def _run_once(cam: CameraConfig) -> None:
                 detection_frame_index += 1
 
                 objects = await asyncio.to_thread(detect_objects, frame)
-                people = [
-                    PersonBox(item.bbox, item.confidence)
-                    for item in objects
-                    if item.category == "person"
-                ]
-                emitted_unknown_face_boxes: list[tuple[int, int, int, int]] = []
 
-                should_run_face = (
-                    (
-                        cam.is_guarded
-                        or cam.alert_wrong_guard
-                        or cam.alert_unknown_person
+                for obj in objects:
+                    if obj.category not in {"person", "vehicle", "animal"}:
+                        continue
+
+                    _track_id, should_alert, _reason = tracker.update(
+                        kind=obj.category,
+                        label=obj.label,
+                        bbox=obj.bbox,
+                        now=now,
+                        frame_index=detection_frame_index,
+                        confirmation_hits=s.unknown_confirmation_hits,
+                        confirmation_window=s.unknown_confirmation_window,
                     )
-                    and now - last_face_analysis >= s.face_recognition_interval_sec
-                )
-                faces = []
 
-                if should_run_face:
-                    last_face_analysis = now
-                    faces = await asyncio.to_thread(analyze, frame)
-
-                matched_faces: list[tuple[DetectedFace, int, str, float]] = []
-
-                face_results = []
-
-                for f in faces:
-                    result = await bank.match_with_score(f.embedding)
-                    face_results.append(result)
-                    m = result.match
-
-                    if m is not None:
-                        matched_faces.append((f, m.guard_id, m.guard_name, m.score))
-
-                if should_run_face and now - last_face_diag_log >= 10.0:
-                    last_face_diag_log = now
-                    if face_results:
-                        best = max(
-                            face_results,
-                            key=lambda item: item.best_score if item.best_score is not None else -1.0,
-                        )
-                        log.info(
-                            "face diagnostic camera=%s people=%d faces=%d matches=%d best_guard=%s best_score=%s threshold=%.2f",
-                            cam.id,
-                            len(people),
-                            len(faces),
-                            len(matched_faces),
-                            best.best_guard_name,
-                            f"{best.best_score:.3f}" if best.best_score is not None else "none",
-                            s.face_match_threshold,
-                        )
-                    else:
-                        log.info(
-                            "face diagnostic camera=%s people=%d faces=0 matches=0 threshold=%.2f",
-                            cam.id,
-                            len(people),
-                            s.face_match_threshold,
-                        )
-
-                emitted_guard_ids: set[int] = set()
-
-                for person in people:
-                    matched = _person_has_matched_face(person, matched_faces)
-
-                    if matched is not None:
-                        face, guard_id, guard_name, score = matched
-
-                        if guard_id in emitted_guard_ids:
-                            continue
-
-                        last_seen = last_guard_heartbeat.get(guard_id, 0.0)
-
-                        if now - last_seen >= s.present_heartbeat_sec:
-                            last_guard_heartbeat[guard_id] = now
-                            emitted_guard_ids.add(guard_id)
-                            log.info(
-                                "guard present matched camera=%s guard=%s guard_id=%s score=%.3f",
-                                cam.id,
-                                guard_name,
-                                guard_id,
-                                score,
-                            )
-
-                            await _emit(
-                                client,
-                                cam,
-                                frame,
-                                person.bbox,
-                                event_type="guard_present",
-                                label=guard_name,
-                                guard_id=guard_id,
-                                face_score=score,
-                                face_bbox=face.bbox,
-                            )
-
-                if cam.alert_unknown_person and should_run_face:
-                    for person in people:
-                        if _person_has_matched_face(person, matched_faces):
-                            continue
-
-                        _track_id, should_alert, _reason = tracker.update(
-                            kind="unknown_person",
-                            label="unknown person",
-                            bbox=person.bbox,
-                            now=now,
-                            frame_index=detection_frame_index,
-                            confirmation_hits=s.unknown_confirmation_hits,
-                            confirmation_window=s.unknown_confirmation_window,
-                        )
-
-                        if should_alert:
-                            emitted_unknown_face_boxes.append(person.bbox)
-                            await _emit(
-                                client,
-                                cam,
-                                frame,
-                                person.bbox,
-                                event_type="unknown_person",
-                                label="unknown person",
-                                guard_id=None,
-                                face_score=None,
-                                face_bbox=None,
-                            )
-
-                    for face in faces:
-                        if _person_has_matched_face(PersonBox(face.bbox, 1.0), matched_faces):
-                            continue
-
-                        if any(_center_inside(face.bbox, person.bbox) for person in people):
-                            continue
-
-                        if any(_iou(face.bbox, sent_bbox) > 0.05 for sent_bbox in emitted_unknown_face_boxes):
-                            continue
-
-                        _track_id, should_alert, _reason = tracker.update(
-                            kind="unknown_face",
-                            label="unknown person",
-                            bbox=face.bbox,
-                            now=now,
-                            frame_index=detection_frame_index,
-                            confirmation_hits=s.unknown_confirmation_hits,
-                            confirmation_window=s.unknown_confirmation_window,
-                        )
-
-                        if should_alert:
-                            emitted_unknown_face_boxes.append(face.bbox)
-                            await _emit(
-                                client,
-                                cam,
-                                frame,
-                                face.bbox,
-                                event_type="unknown_person",
-                                label="unknown person",
-                                guard_id=None,
-                                face_score=None,
-                                face_bbox=face.bbox,
-                            )
-
-                # Fallback: if YOLO missed body but face recognition found a guard.
-                if not people:
-                    for face, guard_id, guard_name, score in matched_faces:
-                        last_seen = last_guard_heartbeat.get(guard_id, 0.0)
-
-                        if now - last_seen < s.present_heartbeat_sec:
-                            continue
-
-                        last_guard_heartbeat[guard_id] = now
-                        log.info(
-                            "guard present matched camera=%s guard=%s guard_id=%s score=%.3f fallback=face_only",
-                            cam.id,
-                            guard_name,
-                            guard_id,
-                            score,
-                        )
-
+                    if should_alert:
+                        event_type = {
+                            "person": "person_detected",
+                            "vehicle": "vehicle_detected",
+                            "animal": "animal_detected",
+                        }[obj.category]
                         await _emit(
                             client,
                             cam,
                             frame,
-                            face.bbox,
-                            event_type="guard_present",
-                            label=guard_name,
-                            guard_id=guard_id,
-                            face_score=score,
-                            face_bbox=face.bbox,
+                            obj.bbox,
+                            event_type=event_type,
+                            label=obj.label,
+                            guard_id=None,
+                            face_score=None,
+                            face_bbox=None,
+                            confidence=obj.confidence,
+                            source="yolo",
                         )
+
 
     finally:
         await asyncio.to_thread(reader.stop)
@@ -659,6 +634,7 @@ async def _emit(
     ts = datetime.utcnow()
     filename = f"{cam.id}_{ts.strftime('%Y%m%d_%H%M%S_%f')}_{event_type}.jpg"
     full_path = Path(s.snapshot_dir) / filename
+    crop_artifact: dict[str, object] = {}
 
     def _write() -> None:
         snapshot_frame = (
@@ -691,10 +667,25 @@ async def _emit(
             draw_bbox = bbox
             draw_face_bbox = face_bbox
 
-        if event_type == "guard_present":
+        if event_type in {"person_detected", "vehicle_detected", "animal_detected"}:
             color = (0, 200, 0)
         else:
             color = (0, 0, 220)
+
+        crop_path = None
+        fingerprint = None
+        crop_category = _event_detection_category(event_type)
+
+        if crop_category is not None:
+            if crop_category == "person":
+                faces = analyze(frame)
+                _selected_bbox, fingerprint = _select_face_crop_bbox(frame, bbox, faces)
+
+            crop_artifact = {
+                "crop_path": None,
+                "fingerprint": fingerprint,
+                "category": crop_category,
+            }
 
         x1, y1, x2, y2 = draw_bbox
         cv2.rectangle(annotated, (x1, y1), (x2, y2), color, 2)
@@ -739,6 +730,35 @@ async def _emit(
 
         if r.status_code >= 400:
             log.warning("ingest failed: %s %s", r.status_code, r.text[:200])
+
+        event_id = None
+        try:
+            event_payload = r.json()
+            event_id = event_payload.get("event_id")
+        except Exception:
+            event_id = None
+
+        if _should_emit_classification(
+            category=str(crop_artifact.get("category") or ""),
+            crop_path=str(crop_artifact.get("crop_path") or ""),
+            fingerprint=crop_artifact.get("fingerprint"),
+        ):
+            classification_resp = await client.post(
+                "/api/detections/classifications",
+                headers=_internal_headers(),
+                json={
+                    "camera_id": cam.id,
+                    "category": crop_artifact.get("category"),
+                    "label": label,
+                    "crop_path": crop_artifact.get("crop_path"),
+                    "fingerprint": crop_artifact.get("fingerprint"),
+                    "event_id": event_id,
+                    "confidence": confidence if confidence is not None else face_score,
+                    "source_event_type": event_type,
+                },
+            )
+            if classification_resp.status_code >= 400:
+                log.warning("classification ingest failed: %s %s", classification_resp.status_code, classification_resp.text[:200])
 
     except Exception as e:
         log.warning("ingest post failed: %s", e)

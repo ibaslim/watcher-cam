@@ -83,7 +83,7 @@ class Settings(BaseSettings):
 
     yolo_model: str = "yolov8m.pt"
     yolo_confidence: float = 0.30
-    yolo_classes: str = "person"
+    yolo_classes: str = "person,vehicle,animal"
     object_min_area: int = 2500
     unknown_confirmation_hits: int = 1
     unknown_confirmation_window: int = 1

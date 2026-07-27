@@ -126,6 +126,7 @@ export type CameraInput = {
 
 export type EventRow = {
   id: number;
+  entity_id?: string | null;
   camera_id: string;
   created_at: string;
   source: "hikvision" | "face" | "presence" | "yolo";
@@ -136,6 +137,22 @@ export type EventRow = {
   guard_id?: number | null;
   guard_name?: string | null;
   face_score?: number | null;
+};
+
+export type ClassificationRow = {
+  id: number;
+  entity_id: string;
+  camera_id: string;
+  category: string;
+  label: string | null;
+  crop_url: string | null;
+  image_url?: string | null;
+  occurrence_count: number;
+  first_seen: string;
+  last_seen: string;
+  confidence: number | null;
+  source_event_type: string | null;
+  classification_key: string;
 };
 
 export type Guard = {
@@ -252,6 +269,8 @@ export type EventFilters = {
   limit?: number;
   date_from?: string;
   date_to?: string;
+  camera_id?: string;
+  entity_id?: string;
 };
 
 export const fetchEvents = (filters: EventFilters = {}) => {
@@ -259,8 +278,31 @@ export const fetchEvents = (filters: EventFilters = {}) => {
   if (filters.limit !== undefined) p.set("limit", String(filters.limit));
   if (filters.date_from) p.set("date_from", filters.date_from);
   if (filters.date_to) p.set("date_to", filters.date_to);
+  if (filters.camera_id) p.set("camera_id", filters.camera_id);
+  if (filters.entity_id) p.set("entity_id", filters.entity_id);
 
   return fetch(`${API_URL}/api/events?${p.toString()}`, authed()).then((r) => ok<EventRow[]>(r));
+};
+
+export type ClassificationFilters = {
+  date_from?: string;
+  date_to?: string;
+};
+
+export const fetchClassifications = (
+  cameraId: string,
+  category?: string,
+  limit = 12,
+  filters: ClassificationFilters = {},
+) => {
+  const p = new URLSearchParams();
+  p.set("camera_id", cameraId);
+  if (category) p.set("category", category);
+  p.set("limit", String(limit));
+  if (filters.date_from) p.set("date_from", filters.date_from);
+  if (filters.date_to) p.set("date_to", filters.date_to);
+
+  return fetch(`${API_URL}/api/events/classifications?${p.toString()}`, authed()).then((r) => ok<ClassificationRow[]>(r));
 };
 export async function ptzMove(id: string, dir: string): Promise<void> {
   await fetch(`${API_URL}/api/ptz/${id}/move/${dir}`, authed({ method: "POST" }));

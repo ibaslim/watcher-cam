@@ -23,6 +23,7 @@ import { Guards } from "./pages/Guards";
 import { CameraSettings } from "./pages/CameraSettings";
 import { CamerasAdmin } from "./pages/CamerasAdmin";
 import { Login } from "./pages/Login";
+import { CameraDetail } from "./pages/CameraDetail";
 import { isPortalToday, portalTodayApiRange } from "./lib/time";
 
 type AuthState = "checking" | "needed" | "ok";
@@ -106,12 +107,10 @@ export function App() {
                     ];
                 });
 
-                if (e.event_type !== "guard_present") {
-                    notify(
-                        `${e.guard_name || e.label || e.event_type} — ${e.camera_id}`,
-                        `${e.source}${e.face_score ? ` · ${(e.face_score * 100).toFixed(0)}%` : ""}`,
-                    );
-                }
+                notify(
+                    `${e.label || e.event_type} — ${e.camera_id}`,
+                    `${e.source}${e.face_score ? ` · ${(e.face_score * 100).toFixed(0)}%` : ""}`,
+                );
             },
             (status) => {
                 setOnline(status === "open");
@@ -169,7 +168,7 @@ function AppShell({
             <NavBar online={online} user={user} />
             <SessionTimeout />
 
-            <Dashboard cameras={cameras} hidden={location.pathname !== "/"} />
+            <Dashboard cameras={cameras} events={events} hidden={location.pathname !== "/"} />
 
             <Routes>
                 <Route path="/" element={null} />
@@ -192,6 +191,7 @@ function AppShell({
                 <Route path="/events" element={<Events events={events} cameras={cameras} />} />
                 <Route path="/recordings" element={<Recordings />} />
                 <Route path="/reports" element={<Reports />} />
+                <Route path="/cameras/:cameraId" element={<CameraDetail cameras={cameras} />} />
             </Routes>
         </div>
     );

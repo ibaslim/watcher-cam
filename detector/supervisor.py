@@ -123,10 +123,6 @@ async def run_camera_supervisor() -> None:
                     c.id: c
                     for c in cams
                     if c.detect
-                    and (
-                        c.is_guarded
-                        or c.alert_unknown_person
-                    )
                 }
 
                 # Stop workers whose cameras vanished or whose connection

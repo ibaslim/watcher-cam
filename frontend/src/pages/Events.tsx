@@ -11,19 +11,14 @@ type Props = {
 const EVENT_FILTERS = [
   { value: "all", label: "All" },
   { value: "alert", label: "Alerts" },
-  { value: "guard_present", label: "Guard present" },
+  { value: "person_detected", label: "Person" },
+  { value: "vehicle_detected", label: "Vehicle" },
+  { value: "animal_detected", label: "Animal" },
   { value: "unknown_person", label: "Unknown" },
-  { value: "guard_absent", label: "Absent" },
-  { value: "wrong_guard", label: "Wrong guard" },
 ];
 
 function isAlert(event: EventRow): boolean {
-  return [
-    "unknown_person",
-    "guard_absent",
-    "wrong_guard",
-    "intrusion",
-  ].includes(event.event_type);
+  return ["unknown_person"].includes(event.event_type);
 }
 
 export function Events({ events, cameras }: Props) {
@@ -58,7 +53,9 @@ export function Events({ events, cameras }: Props) {
 
   const todaysEvents = events.filter((event) => isPortalToday(event.created_at));
   const alertCount = todaysEvents.filter(isAlert).length;
-  const guardCount = todaysEvents.filter((event) => event.event_type === "guard_present").length;
+  const personCount = todaysEvents.filter((event) => event.event_type === "person_detected").length;
+  const vehicleCount = todaysEvents.filter((event) => event.event_type === "vehicle_detected").length;
+  const animalCount = todaysEvents.filter((event) => event.event_type === "animal_detected").length;
 
   return (
     <main className="page events-page">
@@ -69,14 +66,16 @@ export function Events({ events, cameras }: Props) {
             <p className="eyebrow">Event center</p>
             <h2 className="page-title">Security Events</h2>
             <p className="page-sub">
-              Review detections, guard presence, absence alerts, and camera smart events.
+              Review live object detections and camera event history.
             </p>
           </div>
 
           <div className="event-summary-grid">
             <Summary value={todaysEvents.length} label="Today" />
             <Summary value={alertCount} label="Alerts" tone="alert" />
-            <Summary value={guardCount} label="Guard checks" tone="ok" />
+            <Summary value={personCount} label="Persons" tone="ok" />
+            <Summary value={vehicleCount} label="Vehicles" tone="ok" />
+            <Summary value={animalCount} label="Animals" tone="ok" />
           </div>
         </section>
 
@@ -88,7 +87,7 @@ export function Events({ events, cameras }: Props) {
               className="input"
               value={query}
               onChange={(event) => setQuery(event.target.value)}
-              placeholder="Camera, guard, event type..."
+              placeholder="Camera, event type, label..."
             />
           </label>
 

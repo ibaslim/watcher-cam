@@ -19,7 +19,7 @@ const EMPTY: CameraInput = {
   username: "",
   password: "",
   channel: 101,
-  detect: false,
+  detect: true,
   recording_enabled: true,
   rtsp_url_override: "",
 };
@@ -204,6 +204,10 @@ export function CamerasAdmin({ onCamerasChanged }: { onCamerasChanged?: () => vo
           Camera and post changes notify MediaMTX and the detector automatically.
           For non-Hikvision RTSP sources, use <em>RTSP URL override</em>.
         </p>
+
+        <div className="mb-4 rounded-xl border border-emerald-400/20 bg-emerald-500/10 px-4 py-3 text-sm text-emerald-100">
+          New cameras default to detection on. Turn it off only when you want the camera to record without AI processing.
+        </div>
 
         {error && (
           <div className="alert alert-error mb-3">

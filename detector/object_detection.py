@@ -39,20 +39,29 @@ def get_model():
 
 
 def _category(label: str) -> str | None:
-    if label == "person":
+    lowered = label.lower()
+    if lowered == "person":
         return "person"
+    if lowered in {"car", "truck", "bus", "van", "motorbike", "bicycle", "vehicle"}:
+        return "vehicle"
+    if lowered in {"cat", "dog", "bird", "horse", "cow", "sheep", "animal"}:
+        return "animal"
     return None
 
 
 def detect_objects(image_bgr: np.ndarray) -> list[ObjectDetection]:
     settings = get_settings()
     model = get_model()
-    allowed = set(settings.yolo_class_list)
+    allowed_categories = set(settings.yolo_class_list)
     names = model.names
-    class_ids = [class_id for class_id, name in names.items() if name in allowed]
+    class_ids = [
+        class_id
+        for class_id, name in names.items()
+        if _category(name) in allowed_categories
+    ]
 
     if not class_ids:
-        log.warning("none of YOLO_CLASSES matched model labels: %s", sorted(allowed))
+        log.warning("none of YOLO_CLASSES matched model labels: %s", sorted(allowed_categories))
         return []
 
     # Ultralytics models are not safe to run concurrently from multiple camera

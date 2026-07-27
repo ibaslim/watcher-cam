@@ -10,20 +10,16 @@ function formatTime(iso: string): string {
 
 function eventBadge(event: EventRow): { label: string; colorClass: string } {
   switch (event.event_type) {
-    case "guard_present":
-      return { label: event.guard_name || event.label || "Guard present", colorClass: "text-emerald-400" };
-    case "wrong_guard":
-      return { label: "Wrong guard", colorClass: "text-amber-400" };
+    case "person_detected":
+      return { label: "Person detected", colorClass: "text-blue-400" };
+    case "vehicle_detected":
+      return { label: "Vehicle detected", colorClass: "text-cyan-400" };
+    case "animal_detected":
+      return { label: "Animal detected", colorClass: "text-emerald-400" };
     case "unknown_person":
       return { label: "Unknown person", colorClass: "text-red-400" };
-    case "guard_absent":
-      return { label: "Guard absent", colorClass: "text-red-400" };
-    case "line_crossing":
-      return { label: "Line crossing", colorClass: "text-blue-400" };
-    case "intrusion":
-      return { label: "Intrusion", colorClass: "text-red-400" };
     default:
-      return { label: event.label || event.event_type, colorClass: "text-theme" };
+      return { label: event.label || event.event_type.replace(/_/g, " "), colorClass: "text-theme" };
   }
 }
 
