@@ -24,12 +24,17 @@ def _app_timezone() -> ZoneInfo:
         return ZoneInfo("UTC")
 
 
+_RETRY_BASE_SEC = 5
+_RETRY_MAX_SEC = 300
+
+
 class Recorder:
     def __init__(self, camera: CameraConfig):
         self.camera = camera
         self.process: asyncio.subprocess.Process | None = None
         self.task: asyncio.Task | None = None
         self.running = True
+        self.failures = 0
 
     def _output_pattern(self) -> str:
         s = get_settings()
@@ -43,11 +48,22 @@ class Recorder:
         while self.running:
             try:
                 await self._run_ffmpeg()
+                self.failures = 0
             except asyncio.CancelledError:
                 raise
             except Exception as e:
-                log.warning("recorder error for %s: %s", self.camera.id, e)
-                await asyncio.sleep(5)
+                self.failures += 1
+                # Back off on repeated failures: Hikvision locks a source IP for
+                # 30 minutes after 5 failed logins, so fast retries keep it locked.
+                delay = min(_RETRY_BASE_SEC * 2 ** (self.failures - 1), _RETRY_MAX_SEC)
+                log.warning(
+                    "recorder error for %s: %s (attempt %d, retrying in %ds)",
+                    self.camera.id,
+                    e,
+                    self.failures,
+                    delay,
+                )
+                await asyncio.sleep(delay)
 
     async def _run_ffmpeg(self) -> None:
         s = get_settings()

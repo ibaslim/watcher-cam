@@ -7,6 +7,16 @@ from pydantic import BaseModel
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
+def _rtsp_credential(value: str) -> str:
+    """Percent-encode only the delimiters that would break URL parsing.
+
+    FFmpeg does not decode escapes in the userinfo section, so a password like
+    `1qaz!QAZ` must stay literal; encoding it to `1qaz%21QAZ` reaches the camera
+    verbatim and fails digest auth.
+    """
+    return quote(value, safe="!$&'()*+,;=")
+
+
 class CameraConfig(BaseModel):
     """Runtime camera config used by services (mediamtx, hikvision ISAPI, presence).
 
@@ -33,8 +43,8 @@ class CameraConfig(BaseModel):
     def rtsp_url(self) -> str:
         if self.rtsp_url_override:
             return self.rtsp_url_override
-        username = quote(self.username, safe="")
-        password = quote(self.password, safe="")
+        username = _rtsp_credential(self.username)
+        password = _rtsp_credential(self.password)
         return (
             f"rtsp://{username}:{password}"
             f"@{self.host}:{self.rtsp_port}/Streaming/Channels/{self.channel}"
