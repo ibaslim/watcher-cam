@@ -47,9 +47,7 @@ export function NavBar({
               <span className="nav-divider" aria-hidden />
               <div className="nav-group">
                 <span className="nav-group-label">Manage</span>
-                <NavItem to="/guards" label="Guards" />
                 <NavItem to="/cameras" label="Cameras" />
-                <NavItem to="/settings" label="Posts" />
                 <NavItem to="/users" label="Users" />
               </div>
             </>

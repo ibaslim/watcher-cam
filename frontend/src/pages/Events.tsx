@@ -10,16 +10,10 @@ type Props = {
 
 const EVENT_FILTERS = [
   { value: "all", label: "All" },
-  { value: "alert", label: "Alerts" },
   { value: "person_detected", label: "Person" },
   { value: "vehicle_detected", label: "Vehicle" },
   { value: "animal_detected", label: "Animal" },
-  { value: "unknown_person", label: "Unknown" },
 ];
-
-function isAlert(event: EventRow): boolean {
-  return ["unknown_person"].includes(event.event_type);
-}
 
 export function Events({ events, cameras }: Props) {
   const [query, setQuery] = useState("");
@@ -32,7 +26,6 @@ export function Events({ events, cameras }: Props) {
 
     return todaysEvents.filter((event) => {
       if (cameraId !== "all" && event.camera_id !== cameraId) return false;
-      if (filter === "alert" && !isAlert(event)) return false;
       if (filter !== "all" && filter !== "alert" && event.event_type !== filter) return false;
 
       if (!q) return true;
@@ -42,7 +35,6 @@ export function Events({ events, cameras }: Props) {
         event.event_type,
         event.source,
         event.label,
-        event.guard_name,
       ]
         .filter(Boolean)
         .join(" ")
@@ -52,7 +44,7 @@ export function Events({ events, cameras }: Props) {
   }, [cameraId, events, filter, query]);
 
   const todaysEvents = events.filter((event) => isPortalToday(event.created_at));
-  const alertCount = todaysEvents.filter(isAlert).length;
+  const eventCount = todaysEvents.length;
   const personCount = todaysEvents.filter((event) => event.event_type === "person_detected").length;
   const vehicleCount = todaysEvents.filter((event) => event.event_type === "vehicle_detected").length;
   const animalCount = todaysEvents.filter((event) => event.event_type === "animal_detected").length;
@@ -72,7 +64,7 @@ export function Events({ events, cameras }: Props) {
 
           <div className="event-summary-grid">
             <Summary value={todaysEvents.length} label="Today" />
-            <Summary value={alertCount} label="Alerts" tone="alert" />
+            <Summary value={eventCount} label="Total events" tone="alert" />
             <Summary value={personCount} label="Persons" tone="ok" />
             <Summary value={vehicleCount} label="Vehicles" tone="ok" />
             <Summary value={animalCount} label="Animals" tone="ok" />

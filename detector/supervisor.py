@@ -23,7 +23,7 @@ _refresh_event: asyncio.Event | None = None
 
 
 def request_camera_refresh() -> None:
-    """Wake the supervisor so backend camera/post edits apply immediately."""
+    """Wake the supervisor so backend camera edits apply immediately."""
 
     if _refresh_event is not None:
         _refresh_event.set()
@@ -43,12 +43,6 @@ def _camera_signature(c: CameraConfig) -> tuple:
         c.username,
         c.password,
         c.channel,
-        c.assigned_guard_id,
-        c.backup_guard_id,
-        c.alert_guard_absent,
-        c.alert_wrong_guard,
-        c.alert_unknown_person,
-        c.is_guarded,
         c.rtsp_url_override,
     )
 
@@ -96,12 +90,6 @@ async def _fetch_cameras() -> list[CameraConfig] | None:
                 password=row.get("password", ""),
                 channel=row.get("channel", 101),
                 detect=bool(row.get("detect", False)),
-                assigned_guard_id=row.get("assigned_guard_id"),
-                backup_guard_id=row.get("backup_guard_id"),
-                alert_guard_absent=bool(row.get("alert_guard_absent", True)),
-                alert_wrong_guard=bool(row.get("alert_wrong_guard", True)),
-                alert_unknown_person=bool(row.get("alert_unknown_person", False)),
-                is_guarded=bool(row.get("is_guarded", False)),
                 rtsp_url_override=row.get("rtsp_url_override", ""),
             )
         )

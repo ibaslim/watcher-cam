@@ -13,10 +13,11 @@ from sqlalchemy.orm import Session
 
 from app.config import get_settings
 from app.db import get_db
-from app.models import Event, Guard
+from app.models import Event
 from app.services.cameras import list_cameras
 
 router = APIRouter()
+LEGACY_GUARD_EVENT_TYPES = ("guard_present", "guard_absent", "wrong_guard", "unknown_person")
 
 
 def _report_boundary_to_utc(value: datetime | None) -> datetime | None:
@@ -49,6 +50,7 @@ def _event_filters(stmt, camera_id, event_type, source, date_from, date_to):
 
     if camera_id:
         stmt = stmt.where(Event.camera_id == camera_id)
+    stmt = stmt.where(Event.event_type.not_in(LEGACY_GUARD_EVENT_TYPES))
     if event_type:
         stmt = stmt.where(Event.event_type == event_type)
     if source:
@@ -60,15 +62,7 @@ def _event_filters(stmt, camera_id, event_type, source, date_from, date_to):
     return stmt
 
 
-def _guard_names(db: Session, rows: list[Event]) -> dict[int, str]:
-    guard_ids = {e.guard_id for e in rows if e.guard_id is not None}
-    if not guard_ids:
-        return {}
-    guards = db.scalars(select(Guard).where(Guard.id.in_(guard_ids))).all()
-    return {g.id: g.name for g in guards}
-
-
-def _event_to_dict(e: Event, guard_names: dict[int, str]) -> dict:
+def _event_to_dict(e: Event) -> dict:
     return {
         "id": e.id,
         "camera_id": e.camera_id,
@@ -78,9 +72,6 @@ def _event_to_dict(e: Event, guard_names: dict[int, str]) -> dict:
         "label": e.label,
         "confidence": e.confidence,
         "snapshot_url": f"/snapshots/{e.snapshot_path}" if e.snapshot_path else None,
-        "guard_id": e.guard_id,
-        "guard_name": guard_names.get(e.guard_id) if e.guard_id else None,
-        "face_score": e.face_score,
     }
 
 
@@ -100,9 +91,7 @@ def report_events(
     stmt = stmt.limit(limit).offset(offset)
 
     rows = db.scalars(stmt).all()
-    guard_names = _guard_names(db, rows)
-
-    return [_event_to_dict(e, guard_names) for e in rows]
+    return [_event_to_dict(e) for e in rows]
 
 
 @router.get("/summary")
@@ -119,9 +108,6 @@ def report_summary(
     rows = db.scalars(base).all()
 
     total_events = len(rows)
-    unknown_person = sum(1 for e in rows if e.event_type == "unknown_person")
-    guard_present = sum(1 for e in rows if e.event_type == "guard_present")
-    guard_absent = sum(1 for e in rows if e.event_type == "guard_absent")
     intrusion = sum(1 for e in rows if e.event_type == "intrusion")
     line_crossing = sum(1 for e in rows if e.event_type == "line_crossing")
 
@@ -134,9 +120,6 @@ def report_summary(
                 "camera_id": e.camera_id,
                 "camera_name": camera_names.get(e.camera_id, e.camera_id),
                 "total": 0,
-                "unknown_person": 0,
-                "guard_present": 0,
-                "guard_absent": 0,
                 "intrusion": 0,
                 "line_crossing": 0,
             }
@@ -148,9 +131,6 @@ def report_summary(
 
     return {
         "total_events": total_events,
-        "unknown_person": unknown_person,
-        "guard_present": guard_present,
-        "guard_absent": guard_absent,
         "intrusion": intrusion,
         "line_crossing": line_crossing,
         "camera_breakdown": list(camera_breakdown.values()),
@@ -169,8 +149,6 @@ def report_events_csv(
     stmt = select(Event).order_by(Event.created_at.desc())
     stmt = _event_filters(stmt, camera_id, event_type, source, date_from, date_to)
     rows = db.scalars(stmt).all()
-    guard_names = _guard_names(db, rows)
-
     output = io.StringIO()
     writer = csv.writer(output)
 
@@ -181,9 +159,7 @@ def report_events_csv(
         "Source",
         "Event Type",
         "Label",
-        "Guard Name",
         "Confidence",
-        "Face Score",
         "Snapshot",
     ])
 
@@ -195,9 +171,7 @@ def report_events_csv(
             e.source,
             e.event_type,
             e.label or "",
-            guard_names.get(e.guard_id, "") if e.guard_id else "",
             e.confidence if e.confidence is not None else "",
-            e.face_score if e.face_score is not None else "",
             e.snapshot_path or "",
         ])
 

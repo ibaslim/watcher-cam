@@ -186,7 +186,7 @@ def _capture_high_quality_snapshot(cam: CameraConfig):
 
 
 def _event_detection_category(event_type: str) -> str | None:
-    if event_type in {"person_detected", "unknown_person"}:
+    if event_type == "person_detected":
         return "person"
     if event_type in {"vehicle_detected"}:
         return "vehicle"
@@ -604,8 +604,6 @@ async def _run_once(cam: CameraConfig) -> None:
                             obj.bbox,
                             event_type=event_type,
                             label=obj.label,
-                            guard_id=None,
-                            face_score=None,
                             face_bbox=None,
                             confidence=obj.confidence,
                             source="yolo",
@@ -624,8 +622,6 @@ async def _emit(
     *,
     event_type: str,
     label: str,
-    guard_id: int | None,
-    face_score: float | None,
     face_bbox: tuple[int, int, int, int] | None = None,
     confidence: float | None = None,
     source: str = "face",
@@ -694,7 +690,7 @@ async def _emit(
             fx1, fy1, fx2, fy2 = draw_face_bbox
             cv2.rectangle(annotated, (fx1, fy1), (fx2, fy2), (255, 200, 0), 2)
 
-        score = face_score if face_score is not None else confidence
+        score = confidence
         caption = label if score is None else f"{label} {score:.2f}"
 
         cv2.putText(
@@ -721,10 +717,8 @@ async def _emit(
                 "event_type": event_type,
                 "source": source,
                 "label": label,
-                "confidence": confidence if confidence is not None else face_score,
+                "confidence": confidence,
                 "snapshot_path": filename,
-                "guard_id": guard_id,
-                "face_score": face_score,
             },
         )
 
@@ -753,7 +747,7 @@ async def _emit(
                     "crop_path": crop_artifact.get("crop_path"),
                     "fingerprint": crop_artifact.get("fingerprint"),
                     "event_id": event_id,
-                    "confidence": confidence if confidence is not None else face_score,
+                    "confidence": confidence,
                     "source_event_type": event_type,
                 },
             )

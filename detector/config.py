@@ -19,12 +19,6 @@ class CameraConfig(BaseModel):
     password: str = ""
     channel: int = 101
     detect: bool = False
-    assigned_guard_id: int | None = None
-    backup_guard_id: int | None = None
-    alert_guard_absent: bool = True
-    alert_wrong_guard: bool = True
-    alert_unknown_person: bool = False
-    is_guarded: bool = False
     rtsp_url_override: str = ""
 
     @property
@@ -75,11 +69,8 @@ class Settings(BaseSettings):
 
     face_model: str = "buffalo_l"
     face_det_size: int = 320
-    face_match_threshold: float = 0.45
     face_sample_fps: float = 1.0
     face_min_size: int = 40
-    face_recognition_interval_sec: float = 2.0
-    face_bank_refresh_sec: int = 60
 
     yolo_model: str = "yolov8m.pt"
     yolo_confidence: float = 0.30

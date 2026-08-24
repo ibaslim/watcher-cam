@@ -2,8 +2,6 @@
 
 Without this, `data/snapshots/` grows forever — every detection writes a JPEG
 there. We keep snapshots for `snapshot_retention_days` days, then unlink.
-Guard reference photos under `data/guard_photos/` are never auto-deleted
-(those are user-uploaded and valuable until the guard is removed).
 """
 
 from __future__ import annotations

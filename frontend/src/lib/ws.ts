@@ -3,15 +3,12 @@ import { API_URL, getToken } from "./api";
 export type WsEvent = {
   id: number;
   camera_id: string;
-  source: "hikvision" | "face" | "presence" | "yolo";
+  source: "hikvision" | "yolo";
   event_type: string;
   label?: string | null;
   confidence?: number | null;
   snapshot_path?: string | null;
   created_at: string;
-  guard_id?: number | null;
-  guard_name?: string | null;
-  face_score?: number | null;
 };
 
 export type WsStatus = "connecting" | "open" | "closed";

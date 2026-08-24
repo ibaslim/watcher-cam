@@ -15,7 +15,6 @@ from app.api import (
     cameras,
     detections,
     events,
-    guards,
     ptz,
     recordings,
     reports,
@@ -25,7 +24,7 @@ from app.api import (
 from app.api.auth import ensure_default_admin
 from app.config import get_settings
 from app.db import init_db
-from app.services import mediamtx, presence, recording, remux, retention
+from app.services import mediamtx, recording, remux, retention
 from app.services.cameras import list_cameras
 
 log = logging.getLogger("app")
@@ -62,13 +61,12 @@ async def lifespan(app: FastAPI):
 
     background = [
         asyncio.create_task(_run_mediamtx_sync_loop(), name="mediamtx-sync"),
-        asyncio.create_task(presence.run_presence_loop(), name="presence"),
         asyncio.create_task(retention.run_retention_loop(), name="retention"),
         asyncio.create_task(recording.run_recording_loop(), name="recording"),
         asyncio.create_task(remux.run_remux_loop(), name="remux"),
     ]
 
-    log.info("background tasks started: mediamtx-sync + presence + retention + recording + remux")
+    log.info("background tasks started: mediamtx-sync + retention + recording + remux")
 
     try:
         yield
@@ -112,10 +110,6 @@ app.include_router(cameras.router, prefix="/api/cameras", tags=["cameras"], depe
 app.include_router(events.router, prefix="/api/events", tags=["events"], dependencies=protected)
 app.include_router(ptz.router, prefix="/api/ptz", tags=["ptz"], dependencies=protected)
 
-# Guards router applies route-level protection because the detector uses
-# GET /api/guards/embeddings with the internal service token.
-app.include_router(guards.router, prefix="/api/guards", tags=["guards"])
-
 app.include_router(reports.router, prefix="/api/reports", tags=["reports"], dependencies=protected)
 app.include_router(recordings.router, prefix="/api/recordings", tags=["recordings"], dependencies=protected)
 app.include_router(users.router, prefix="/api/users", tags=["users"], dependencies=protected)
@@ -130,10 +124,6 @@ app.include_router(ws.router, prefix="/ws", tags=["ws"])
 
 Path(_settings.snapshot_dir).mkdir(parents=True, exist_ok=True)
 app.mount("/snapshots", StaticFiles(directory=_settings.snapshot_dir), name="snapshots")
-
-_photos_dir = Path(_settings.snapshot_dir).parent / "guard_photos"
-_photos_dir.mkdir(parents=True, exist_ok=True)
-app.mount("/guard_photos", StaticFiles(directory=str(_photos_dir)), name="guard_photos")
 
 _recordings_dir = Path(_settings.recording_dir)
 _recordings_dir.mkdir(parents=True, exist_ok=True)

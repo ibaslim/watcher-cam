@@ -30,17 +30,7 @@ def _apply_sqlite_additive_migrations() -> None:
     if not _settings.database_url.startswith("sqlite"):
         return
 
-    post_columns = {column["name"] for column in inspect(engine).get_columns("camera_posts")}
-    post_additions = {
-    }
-
     with engine.begin() as connection:
-        for name, definition in post_additions.items():
-            if name not in post_columns:
-                connection.execute(
-                    text(f"ALTER TABLE camera_posts ADD COLUMN {name} {definition}")
-                )
-
         camera_columns = {column["name"] for column in inspect(engine).get_columns("cameras")}
         camera_additions = {
             "recorder_id": "VARCHAR(64) NOT NULL DEFAULT ''",
