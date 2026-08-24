@@ -21,9 +21,10 @@ from sqlalchemy.orm import Session
 from app.api.auth import require_admin
 from app.config import get_settings
 from app.db import get_db
-from app.models import CameraClassification, Event, Guard, User
+from app.models import CameraClassification, Event, User
 
 router = APIRouter()
+LEGACY_GUARD_EVENT_TYPES = ("guard_present", "guard_absent", "wrong_guard", "unknown_person")
 
 ENTITY_MATCH_WINDOW = timedelta(minutes=20)
 ENTITY_HASH_DISTANCE_THRESHOLD = 10
@@ -88,7 +89,7 @@ def list_events(
     date_from = _local_boundary_to_utc(date_from) or since
     date_to = _local_boundary_to_utc(date_to)
 
-    stmt = select(Event).order_by(Event.created_at.desc())
+    stmt = select(Event).where(Event.event_type.not_in(LEGACY_GUARD_EVENT_TYPES)).order_by(Event.created_at.desc())
     if camera_id:
         stmt = stmt.where(Event.camera_id == camera_id)
     if entity_id:
@@ -107,12 +108,6 @@ def list_events(
 
     rows = db.scalars(stmt).all()
 
-    guard_ids = {e.guard_id for e in rows if e.guard_id is not None}
-    guard_names: dict[int, str] = {}
-    if guard_ids:
-        guards = db.scalars(select(Guard).where(Guard.id.in_(guard_ids))).all()
-        guard_names = {g.id: g.name for g in guards}
-
     return [
         {
             "id": e.id,
@@ -124,9 +119,6 @@ def list_events(
             "confidence": e.confidence,
             "snapshot_url": f"/snapshots/{e.snapshot_path}" if e.snapshot_path else None,
             "entity_id": e.entity_id,
-            "guard_id": e.guard_id,
-            "guard_name": guard_names.get(e.guard_id) if e.guard_id else None,
-            "face_score": e.face_score,
         }
         for e in rows
     ]

@@ -129,14 +129,11 @@ export type EventRow = {
   entity_id?: string | null;
   camera_id: string;
   created_at: string;
-  source: "hikvision" | "face" | "presence" | "yolo";
+  source: "hikvision" | "yolo";
   event_type: string;
   label: string | null;
   confidence: number | null;
   snapshot_url: string | null;
-  guard_id?: number | null;
-  guard_name?: string | null;
-  face_score?: number | null;
 };
 
 export type ClassificationRow = {
@@ -155,41 +152,14 @@ export type ClassificationRow = {
   classification_key: string;
 };
 
-export type Guard = {
-  id: number;
-  name: string;
-  active: boolean;
-  photo_count: number;
-  created_at: string;
-};
-
-export type PostConfig = {
-  camera_id: string;
-  post_name: string;
-  assigned_guard_id: number | null;
-  backup_guard_id: number | null;
-  alert_guard_absent: boolean;
-  alert_wrong_guard: boolean;
-  alert_unknown_person: boolean;
-  is_guarded: boolean;
-  duty_start_hour: number;
-  duty_end_hour: number;
-  absence_threshold_min: number;
-};
 export type ReportSummary = {
   total_events: number;
-  unknown_person: number;
-  guard_present: number;
-  guard_absent: number;
   intrusion: number;
   line_crossing: number;
   camera_breakdown: {
     camera_id: string;
     camera_name: string;
     total: number;
-    unknown_person: number;
-    guard_present: number;
-    guard_absent: number;
     intrusion: number;
     line_crossing: number;
   }[];
@@ -311,47 +281,6 @@ export async function ptzZoom(id: string, dir: "in" | "out" | "stop"): Promise<v
   await fetch(`${API_URL}/api/ptz/${id}/zoom/${dir}`, authed({ method: "POST" }));
 }
 
-// ------------- camera post config -------------
-export const fetchPost = (id: string) =>
-  fetch(`${API_URL}/api/cameras/${id}/post`, authed()).then((r) => ok<PostConfig>(r));
-export const savePost = (id: string, body: Omit<PostConfig, "camera_id">) =>
-  fetch(`${API_URL}/api/cameras/${id}/post`, authed({
-    method: "PUT",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify(body),
-  })).then((r) => ok<PostConfig>(r));
-
-// ------------- guards -------------
-export const fetchGuards = () =>
-  fetch(`${API_URL}/api/guards`, authed()).then((r) => ok<Guard[]>(r));
-
-export const createGuard = (name: string) =>
-  fetch(`${API_URL}/api/guards`, authed({
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ name }),
-  })).then((r) => ok<Guard>(r));
-
-export const deleteGuard = (id: number) =>
-  fetch(`${API_URL}/api/guards/${id}`, authed({ method: "DELETE" })).then((r) => ok<unknown>(r));
-
-export type PhotoUploadResult = {
-  ok: true;
-  embedding_id: number;
-  photo_url: string;
-  det_score: number | null;
-};
-
-export async function uploadGuardPhoto(id: number, file: File): Promise<PhotoUploadResult> {
-  const form = new FormData();
-  form.append("file", file);
-  const r = await fetch(`${API_URL}/api/guards/${id}/photos`, authed({
-    method: "POST",
-    body: form,
-  }));
-  if (!r.ok) throw new Error(await r.text());
-  return r.json();
-}
 // ------------- reports -------------
 function reportQuery(filters: ReportFilters): string {
   const p = new URLSearchParams();

@@ -75,14 +75,14 @@ export function Login({ onAuthed }: { onAuthed: () => void }) {
           </h2>
           <p className="text-theme-muted text-sm mb-6 leading-relaxed">
             Real-time surveillance with intelligent face recognition, object
-            detection, and automated guard management.
+            detection and automated camera monitoring.
           </p>
 
           <div className="space-y-3">
             {[
               "Face recognition & unknown person alerts",
               "Live RTSP stream monitoring",
-              "Guard presence & duty scheduling",
+              "Real-time person, vehicle, and animal detection",
             ].map((text) => (
               <div
                 key={text}

@@ -16,8 +16,6 @@ function eventBadge(event: EventRow): { label: string; colorClass: string } {
       return { label: "Vehicle detected", colorClass: "text-cyan-400" };
     case "animal_detected":
       return { label: "Animal detected", colorClass: "text-emerald-400" };
-    case "unknown_person":
-      return { label: "Unknown person", colorClass: "text-red-400" };
     default:
       return { label: event.label || event.event_type.replace(/_/g, " "), colorClass: "text-theme" };
   }
@@ -68,9 +66,9 @@ export function EventLog({ events }: Props) {
                       {badge.label}
                     </span>
 
-                    {(event.face_score != null || event.confidence != null) && (
+                    {event.confidence != null && (
                       <span className="text-[10px] font-mono text-theme-muted">
-                        {((event.face_score ?? event.confidence ?? 0) * 100).toFixed(0)}%
+                        {(event.confidence * 100).toFixed(0)}%
                       </span>
                     )}
                   </div>
@@ -130,14 +128,10 @@ function EventDetail({ event, onClose }: { event: EventRow; onClose: () => void 
         <dl className="event-detail-grid">
           <Detail label="Event">{event.event_type}</Detail>
           <Detail label="Camera">{event.camera_id}</Detail>
-          {event.guard_name && <Detail label="Guard">{event.guard_name}</Detail>}
-          {event.face_score != null && (
-            <Detail label="Match confidence">{(event.face_score * 100).toFixed(1)}%</Detail>
-          )}
-          {event.face_score == null && event.confidence != null && (
+          {event.confidence != null && (
             <Detail label="Detection confidence">{(event.confidence * 100).toFixed(1)}%</Detail>
           )}
-          {event.label && !event.guard_name && <Detail label="Detected object">{event.label}</Detail>}
+          {event.label && <Detail label="Detected object">{event.label}</Detail>}
           <Detail label="Source">{event.source}</Detail>
           <Detail label="Time">{formatTime(event.created_at)}</Detail>
         </dl>

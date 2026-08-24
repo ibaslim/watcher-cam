@@ -174,9 +174,6 @@ export function CameraDetail({ cameras }: Props) {
           label: payload.label ?? null,
           confidence: payload.confidence ?? null,
           snapshot_url: payload.snapshot_path ? `/snapshots/${payload.snapshot_path}` : null,
-          guard_id: payload.guard_id ?? null,
-          guard_name: payload.guard_name ?? null,
-          face_score: payload.face_score ?? null,
         } satisfies EventRow;
 
         const withoutDuplicate = prev.filter((item) => item.id !== nextEvent.id);

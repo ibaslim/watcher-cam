@@ -11,16 +11,16 @@ from sqlalchemy.orm import Session
 from app.api import auth
 from app.config import CameraConfig, get_settings
 from app.db import get_db
-from app.models import Camera, CameraPost, User
+from app.models import Camera, User
 from app.services import mediamtx
-from app.services.cameras import list_cameras, valid_camera_ids
+from app.services.cameras import list_cameras
 
 router = APIRouter()
 log = logging.getLogger(__name__)
 
 
 async def _notify_detector_refresh(reason: str) -> None:
-    """Ask detector supervisor to reload camera/post settings immediately."""
+    """Ask the detector supervisor to reload camera settings immediately."""
 
     url = f"{get_settings().detector_url.rstrip('/')}/refresh-cameras"
 
@@ -66,20 +66,9 @@ def list_all_internal(db: Annotated[Session, Depends(get_db)]) -> list[dict]:
     rows = []
 
     for c in list_cameras():
-        post = db.get(CameraPost, c.id)
-
         rows.append({
             **_camera_view(c),
             "password": c.password,
-
-            "assigned_guard_id": post.assigned_guard_id if post else None,
-            "backup_guard_id": post.backup_guard_id if post else None,
-
-            "alert_guard_absent": post.alert_guard_absent if post else True,
-            "alert_wrong_guard": post.alert_wrong_guard if post else True,
-            "alert_unknown_person": post.alert_unknown_person if post else False,
-
-            "is_guarded": post.is_guarded if post else False,
         })
 
     return rows
@@ -148,11 +137,6 @@ async def delete_recorder(
         raise HTTPException(404, "NVR/DVR not found")
 
     camera_ids = [row.id for row in rows]
-
-    for camera_id in camera_ids:
-        post = db.get(CameraPost, camera_id)
-        if post is not None:
-            db.delete(post)
 
     for row in rows:
         db.delete(row)
@@ -249,10 +233,6 @@ async def delete_camera(
 
     db.delete(row)
 
-    post = db.get(CameraPost, camera_id)
-    if post is not None:
-        db.delete(post)
-
     db.commit()
 
     try:
@@ -261,95 +241,3 @@ async def delete_camera(
         pass
 
     await _notify_detector_refresh("camera delete")
-
-
-class PostConfig(BaseModel):
-    post_name: str = ""
-    assigned_guard_id: int | None = None
-    backup_guard_id: int | None = None
-    is_guarded: bool = True
-    duty_start_hour: int = Field(0, ge=0, le=23)
-    duty_end_hour: int = Field(24, ge=0, le=24)
-    absence_threshold_min: int = Field(15, ge=1, le=240)
-    alert_guard_absent: bool = True
-    alert_wrong_guard: bool = True
-    alert_unknown_person: bool = False
-
-
-def _to_view(p: CameraPost) -> dict:
-    return {
-        "camera_id": p.camera_id,
-        "post_name": p.post_name,
-        "assigned_guard_id": p.assigned_guard_id,
-        "backup_guard_id": p.backup_guard_id,
-        "is_guarded": p.is_guarded,
-        "duty_start_hour": p.duty_start_hour,
-        "duty_end_hour": p.duty_end_hour,
-        "absence_threshold_min": p.absence_threshold_min,
-        "alert_guard_absent": p.alert_guard_absent,
-        "alert_wrong_guard": p.alert_wrong_guard,
-        "alert_unknown_person": p.alert_unknown_person,
-    }
-
-
-@router.get("/{camera_id}/post")
-def get_post(camera_id: str, db: Annotated[Session, Depends(get_db)]) -> dict:
-    if camera_id not in valid_camera_ids():
-        raise HTTPException(404, "camera not found")
-
-    p = db.get(CameraPost, camera_id)
-
-    if not p:
-        return {
-            "camera_id": camera_id,
-            "post_name": "",
-            "assigned_guard_id": None,
-            "backup_guard_id": None,
-            "is_guarded": False,
-            "duty_start_hour": 0,
-            "duty_end_hour": 24,
-            "absence_threshold_min": 15,
-            "alert_guard_absent": True,
-            "alert_wrong_guard": True,
-            "alert_unknown_person": False,
-        }
-
-    return _to_view(p)
-
-
-@router.put("/{camera_id}/post")
-async def put_post(
-    _admin: Annotated[User, Depends(auth.require_admin)],
-    camera_id: str,
-    payload: PostConfig,
-    db: Annotated[Session, Depends(get_db)],
-) -> dict:
-    if camera_id not in valid_camera_ids():
-        raise HTTPException(404, "camera not found")
-
-    if payload.duty_end_hour <= payload.duty_start_hour:
-        raise HTTPException(400, "duty_end_hour must be greater than duty_start_hour")
-
-    p = db.get(CameraPost, camera_id)
-
-    if not p:
-        p = CameraPost(camera_id=camera_id)
-        db.add(p)
-
-    p.post_name = payload.post_name
-    p.assigned_guard_id = payload.assigned_guard_id
-    p.backup_guard_id = payload.backup_guard_id
-    p.is_guarded = payload.is_guarded
-    p.duty_start_hour = payload.duty_start_hour
-    p.duty_end_hour = payload.duty_end_hour
-    p.absence_threshold_min = payload.absence_threshold_min
-    p.alert_guard_absent = payload.alert_guard_absent
-    p.alert_wrong_guard = payload.alert_wrong_guard
-    p.alert_unknown_person = payload.alert_unknown_person
-
-    db.commit()
-    db.refresh(p)
-
-    await _notify_detector_refresh("post update")
-
-    return _to_view(p)

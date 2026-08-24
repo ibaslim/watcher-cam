@@ -138,7 +138,7 @@ export function Reports() {
       <div className="page-inner">
         <h2 className="page-title">Reports</h2>
         <p className="page-sub">
-          Generate AI reports for people, guards, and camera-wise activity.
+          Generate AI reports for detected objects and camera-wise activity.
         </p>
 
         {/* Filters card */}
@@ -188,9 +188,9 @@ export function Reports() {
                 onChange={(e) => set("event_type", e.target.value)}
               >
                 <option value="">All events</option>
-                <option value="unknown_person">Unknown Person</option>
-                <option value="guard_present">Guard Present</option>
-                <option value="guard_absent">Guard Absent</option>
+                <option value="person_detected">Person Detected</option>
+                <option value="vehicle_detected">Vehicle Detected</option>
+                <option value="animal_detected">Animal Detected</option>
               </select>
             </label>
 
@@ -202,8 +202,6 @@ export function Reports() {
                 onChange={(e) => set("source", e.target.value)}
               >
                 <option value="">All sources</option>
-                <option value="face">Face</option>
-                <option value="presence">Presence</option>
                 <option value="hikvision">Hikvision</option>
                 <option value="yolo">YOLO</option>
               </select>
@@ -234,18 +232,6 @@ export function Reports() {
               <span>Total Events</span>
               <strong>{summary.total_events}</strong>
             </div>
-            <div className="summary-box danger">
-              <span>Unknown Persons</span>
-              <strong>{summary.unknown_person}</strong>
-            </div>
-            <div className="summary-box ok">
-              <span>Guard Present</span>
-              <strong>{summary.guard_present}</strong>
-            </div>
-            <div className="summary-box danger">
-              <span>Guard Absent</span>
-              <strong>{summary.guard_absent}</strong>
-            </div>
           </div>
         )}
 
@@ -260,9 +246,6 @@ export function Reports() {
                   <tr>
                     <th>Camera</th>
                     <th>Total</th>
-                    <th>Unknown</th>
-                    <th>Present</th>
-                    <th>Absent</th>
                   </tr>
                 </thead>
                 <tbody>
@@ -270,9 +253,6 @@ export function Reports() {
                     <tr key={c.camera_id}>
                       <td>{c.camera_name}</td>
                       <td>{c.total}</td>
-                      <td>{c.unknown_person}</td>
-                      <td>{c.guard_present}</td>
-                      <td>{c.guard_absent}</td>
                     </tr>
                   ))}
                 </tbody>
@@ -319,7 +299,6 @@ export function Reports() {
                 <th>Camera</th>
                 <th>Event</th>
                 <th>Source</th>
-                <th>Guard</th>
                 <th>Confidence</th>
                 <th>Snapshot</th>
               </tr>
@@ -327,7 +306,7 @@ export function Reports() {
             <tbody>
               {events.length === 0 ? (
                 <tr>
-                  <td colSpan={8} className="text-center text-theme-muted">No report data generated yet.</td>
+                  <td colSpan={7} className="text-center text-theme-muted">No report data generated yet.</td>
                 </tr>
               ) : (
                 events.map((e) => (
@@ -343,20 +322,15 @@ export function Reports() {
                     <td>{e.camera_id}</td>
                     <td>
                       <span className={`badge ${
-                        e.event_type === "guard_present" ? "badge-ok" :
-                        e.event_type === "guard_absent" || e.event_type === "unknown_person" ? "badge-danger" :
-                        e.event_type === "wrong_guard" ? "badge-warn" :
+                        e.event_type === "person_detected" ? "badge-danger" :
                         "badge-muted"
                       }`}>
                         {e.event_type}
                       </span>
                     </td>
                     <td>{e.source}</td>
-                    <td>{e.guard_name || "—"}</td>
                     <td>
-                      {e.face_score != null
-                        ? `${(e.face_score * 100).toFixed(1)}%`
-                        : e.confidence != null
+                      {e.confidence != null
                           ? `${(e.confidence * 100).toFixed(1)}%`
                           : "—"}
                     </td>

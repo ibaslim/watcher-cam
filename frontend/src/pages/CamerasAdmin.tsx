@@ -201,7 +201,7 @@ export function CamerasAdmin({ onCamerasChanged }: { onCamerasChanged?: () => vo
 
         <p className="page-sub">
           Add and manage individual Hikvision cameras.
-          Camera and post changes notify MediaMTX and the detector automatically.
+          Camera changes notify MediaMTX and the detector automatically.
           For non-Hikvision RTSP sources, use <em>RTSP URL override</em>.
         </p>
 

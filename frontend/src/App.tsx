@@ -19,8 +19,6 @@ import { connectEvents, notify, requestDesktopNotifications, WsEvent } from "./l
 import { NavBar } from "./components/NavBar";
 import { SessionTimeout } from "./components/SessionTimeout";
 import { Dashboard } from "./pages/Dashboard";
-import { Guards } from "./pages/Guards";
-import { CameraSettings } from "./pages/CameraSettings";
 import { CamerasAdmin } from "./pages/CamerasAdmin";
 import { Login } from "./pages/Login";
 import { CameraDetail } from "./pages/CameraDetail";
@@ -92,9 +90,6 @@ export function App() {
                         label: e.label ?? null,
                         confidence: e.confidence ?? null,
                         snapshot_url: e.snapshot_path ? `/snapshots/${e.snapshot_path}` : null,
-                        guard_id: e.guard_id ?? null,
-                        guard_name: e.guard_name ?? null,
-                        face_score: e.face_score ?? null,
                     };
 
                     if (!isPortalToday(nextEvent.created_at)) {
@@ -109,7 +104,7 @@ export function App() {
 
                 notify(
                     `${e.label || e.event_type} — ${e.camera_id}`,
-                    `${e.source}${e.face_score ? ` · ${(e.face_score * 100).toFixed(0)}%` : ""}`,
+                    `${e.source}${e.confidence ? ` · ${(e.confidence * 100).toFixed(0)}%` : ""}`,
                 );
             },
             (status) => {
@@ -173,8 +168,6 @@ function AppShell({
             <Routes>
                 <Route path="/" element={null} />
 
-                <Route path="/guards" element={isAdmin ? <Guards /> : <Forbidden />} />
-
                 <Route
                     path="/cameras"
                     element={
@@ -186,7 +179,6 @@ function AppShell({
                     }
                 />
 
-                <Route path="/settings" element={isAdmin ? <CameraSettings /> : <Forbidden />} />
                 <Route path="/users" element={isAdmin ? <Users /> : <Forbidden />} />
                 <Route path="/events" element={<Events events={events} cameras={cameras} />} />
                 <Route path="/recordings" element={<Recordings />} />
