@@ -117,6 +117,13 @@ class Settings(BaseSettings):
     # Inside docker compose this resolves to the `detector` service.
     detector_url: str = "http://detector:8001"
 
+    # Persistent face identity matching. Thresholds must be calibrated with
+    # footage from the deployed cameras; conservative defaults reduce merges.
+    person_match_threshold: float = 0.48
+    person_match_margin: float = 0.06
+    person_max_embeddings: int = 8
+    person_template_novelty: float = 0.94
+
     # When true, a virtual "demo-webcam" camera is exposed in /api/cameras
     # so a developer can test the dashboard without real Hikvision hardware.
     # Pair with scripts/webcam.sh which publishes the laptop webcam to MediaMTX.

@@ -541,7 +541,7 @@
     position: relative;
     display: inline-flex;
     align-items: center;
-    cursor: help;
+    cursor: help;z
     margin-left: 4px;
   }
   .infotip-ic {

@@ -3,6 +3,7 @@ from __future__ import annotations
 from datetime import datetime
 
 from sqlalchemy import (
+    LargeBinary,
     Boolean,
     DateTime,
     Float,
@@ -69,6 +70,74 @@ class Event(Base):
     snapshot_path: Mapped[str | None] = mapped_column(String(255), nullable=True)
     entity_id: Mapped[str | None] = mapped_column(String(64), nullable=True, index=True)
     raw: Mapped[str | None] = mapped_column(Text, nullable=True)
+
+
+class PersonIdentity(Base):
+    """A persistent, global identity inferred from high-quality face samples."""
+
+    __tablename__ = "person_identities"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    public_id: Mapped[str] = mapped_column(String(64), unique=True, index=True)
+    display_name: Mapped[str | None] = mapped_column(String(128), nullable=True)
+    status: Mapped[str] = mapped_column(String(24), default="provisional", index=True)
+    representative_image_path: Mapped[str | None] = mapped_column(String(255), nullable=True)
+    appearance_count: Mapped[int] = mapped_column(Integer, default=0)
+    first_seen: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow, index=True)
+    last_seen: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow, index=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
+    updated_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
+
+
+class PersonEmbedding(Base):
+    """A normalized float32 ArcFace template belonging to one identity."""
+
+    __tablename__ = "person_embeddings"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    person_id: Mapped[int] = mapped_column(Integer, index=True)
+    embedding: Mapped[bytes] = mapped_column(LargeBinary)
+    dimensions: Mapped[int] = mapped_column(Integer, default=512)
+    model_name: Mapped[str] = mapped_column(String(64), default="buffalo_l")
+    quality_score: Mapped[float | None] = mapped_column(Float, nullable=True)
+    camera_id: Mapped[str | None] = mapped_column(String(64), nullable=True, index=True)
+    face_image_path: Mapped[str | None] = mapped_column(String(255), nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow, index=True)
+
+
+class PersonAppearance(Base):
+    """One saved visit/snapshot in a person's album."""
+
+    __tablename__ = "person_appearances"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    person_id: Mapped[int] = mapped_column(Integer, index=True)
+    event_id: Mapped[int | None] = mapped_column(Integer, nullable=True, unique=True, index=True)
+    camera_id: Mapped[str] = mapped_column(String(64), index=True)
+    track_id: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    snapshot_path: Mapped[str | None] = mapped_column(String(255), nullable=True)
+    person_crop_path: Mapped[str | None] = mapped_column(String(255), nullable=True)
+    face_crop_path: Mapped[str | None] = mapped_column(String(255), nullable=True)
+    match_score: Mapped[float | None] = mapped_column(Float, nullable=True)
+    face_quality: Mapped[float | None] = mapped_column(Float, nullable=True)
+    match_method: Mapped[str] = mapped_column(String(32), default="face")
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow, index=True)
+
+
+class AmbiguousAppearance(Base):
+    """A person detection without a face reliable enough for identification."""
+
+    __tablename__ = "ambiguous_appearances"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    public_id: Mapped[str] = mapped_column(String(64), unique=True, index=True)
+    event_id: Mapped[int | None] = mapped_column(Integer, nullable=True, unique=True, index=True)
+    camera_id: Mapped[str] = mapped_column(String(64), index=True)
+    track_id: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    snapshot_path: Mapped[str | None] = mapped_column(String(255), nullable=True)
+    person_crop_path: Mapped[str | None] = mapped_column(String(255), nullable=True)
+    reason: Mapped[str] = mapped_column(String(64), default="no_usable_face")
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow, index=True)
 
 class CameraClassification(Base):
     """A cropped, per-camera gallery item for unique detections."""

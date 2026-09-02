@@ -6,8 +6,12 @@ import {
   ClassificationRow,
   EventRow,
   MEDIAMTX_URL,
+  PersonAppearanceRow,
+  PersonIdentityRow,
   fetchClassifications,
   fetchEvents,
+  fetchPersonAppearances,
+  fetchPersons,
 } from "../lib/api";
 import { formatPortalDateTime, PORTAL_TIME_ZONE_LABEL } from "../lib/time";
 import { startWhep, WhepHandle } from "../lib/whep";
@@ -21,6 +25,10 @@ export function CameraDetail({ cameras }: Props) {
   const [status, setStatus] = useState<"connecting" | "live" | "error">("connecting");
   const [events, setEvents] = useState<EventRow[]>([]);
   const [classifications, setClassifications] = useState<ClassificationRow[]>([]);
+  const [persons, setPersons] = useState<PersonIdentityRow[]>([]);
+  const [selectedPerson, setSelectedPerson] = useState<PersonIdentityRow | null>(null);
+  const [personAlbum, setPersonAlbum] = useState<PersonAppearanceRow[]>([]);
+  const [loadingPersonAlbum, setLoadingPersonAlbum] = useState(false);
   const [loadingEvents, setLoadingEvents] = useState(false);
   const [loadingClassifications, setLoadingClassifications] = useState(false);
   const [activeEvidenceTab, setActiveEvidenceTab] = useState<"snapshots" | "detections">("snapshots");
@@ -126,13 +134,20 @@ export function CameraDetail({ cameras }: Props) {
 
     setLoadingClassifications(true);
     try {
-      const rows = await fetchClassifications(camera.id, undefined, 48, {
-        date_from: classificationDateFrom,
-        date_to: classificationDateTo,
-      });
-      if (mountedRef.current) setClassifications(rows);
+      const range = { date_from: classificationDateFrom, date_to: classificationDateTo };
+      const [rows, personRows] = await Promise.all([
+        fetchClassifications(camera.id, undefined, 48, range),
+        fetchPersons(camera.id, range),
+      ]);
+      if (mountedRef.current) {
+        setClassifications(rows);
+        setPersons(personRows);
+      }
     } catch {
-      if (mountedRef.current) setClassifications([]);
+      if (mountedRef.current) {
+        setClassifications([]);
+        setPersons([]);
+      }
     } finally {
       if (mountedRef.current) setLoadingClassifications(false);
     }
@@ -204,9 +219,44 @@ export function CameraDetail({ cameras }: Props) {
     return rows;
   }, [events, selectedEntityId, snapshotFilter]);
 
+  const combinedClassifications = useMemo(() => {
+    const personIds = new Set(persons.map((person) => person.entity_id));
+    const nonPersonRows = classifications.filter((item) => item.category !== "person" || !personIds.has(item.entity_id));
+    const personRows: ClassificationRow[] = persons.map((person, index) => ({
+      id: -(index + 1),
+      entity_id: person.entity_id,
+      camera_id: camera?.id || "",
+      category: "person",
+      label: person.display_name || "Unknown person",
+      crop_url: person.image_url,
+      image_url: person.image_url,
+      occurrence_count: person.appearance_count,
+      first_seen: person.first_seen,
+      last_seen: person.last_seen,
+      confidence: null,
+      source_event_type: "person_detected",
+      classification_key: person.entity_id,
+    }));
+    return [...personRows, ...nonPersonRows].sort((a, b) => b.last_seen.localeCompare(a.last_seen));
+  }, [camera?.id, classifications, persons]);
+
   const filteredClassifications = useMemo(() => {
-    return classifications.filter((item) => detectionFilter === "all" || item.category === detectionFilter);
-  }, [classifications, detectionFilter]);
+    return combinedClassifications.filter((item) => detectionFilter === "all" || item.category === detectionFilter);
+  }, [combinedClassifications, detectionFilter]);
+
+  const openPersonAlbum = async (person: PersonIdentityRow) => {
+    if (!camera) return;
+    setSelectedPerson(person);
+    setPersonAlbum([]);
+    setLoadingPersonAlbum(true);
+    try {
+      setPersonAlbum(await fetchPersonAppearances(person.entity_id, camera.id));
+    } catch {
+      setPersonAlbum([]);
+    } finally {
+      setLoadingPersonAlbum(false);
+    }
+  };
 
   const clearClassificationRange = () => {
     setClassificationStartDate("");
@@ -319,7 +369,7 @@ export function CameraDetail({ cameras }: Props) {
                     </div>
                     <div className="rounded-[16px] border border-verkada-border bg-verkada-hover p-3">
                       <p className="font-semibold text-theme">Evidence timeline</p>
-                      <p className="mt-1 text-theme-muted">Recent snapshots and unique detections refresh below the live view for rapid review.</p>
+                      <p className="mt-1 text-theme-muted">Recent snapshots and unique classifications refresh below the live view for rapid review.</p>
                     </div>
                   </div>
                 </div>
@@ -354,7 +404,7 @@ export function CameraDetail({ cameras }: Props) {
                   }}
                   className={`rounded-full px-3 py-1.5 text-[11px] font-semibold ${activeEvidenceTab === "detections" ? "bg-emerald-400 text-black" : "border border-verkada-border bg-verkada-hover text-theme"}`}
                 >
-                  Unique detections
+                  Unique classifications
                 </button>
               </div>
             </div>
@@ -458,7 +508,7 @@ export function CameraDetail({ cameras }: Props) {
                     >
                       Clear range
                     </button>
-                    <span className="text-theme-muted">Filters apply to unique detections only.</span>
+                    <span className="text-theme-muted">Filters apply to unique classifications only.</span>
                   </div>
                 </div>
               ) : null}
@@ -564,10 +614,10 @@ export function CameraDetail({ cameras }: Props) {
                 </div>
               )
             ) : loadingClassifications ? (
-              <div className="rounded-[20px] border border-verkada-border bg-verkada-surface p-6 text-sm text-theme-muted">Loading unique detections…</div>
+              <div className="rounded-[20px] border border-verkada-border bg-verkada-surface p-6 text-sm text-theme-muted">Loading unique classifications…</div>
             ) : visibleClassifications.length === 0 ? (
               <div className="rounded-[20px] border border-verkada-border bg-verkada-surface p-6 text-sm text-theme-muted">
-                No unique detections match the selected filter yet.
+                No unique classifications match the selected filter yet.
               </div>
             ) : (
               <div className="grid gap-4 md:grid-cols-2 xl:grid-cols-3">
@@ -575,6 +625,9 @@ export function CameraDetail({ cameras }: Props) {
                   const title = item.label || item.category;
                   const src = item.image_url || item.crop_url ? `${API_URL}${(item.image_url || item.crop_url)!}` : null;
                   const hasImage = Boolean(src);
+                  const person = item.category === "person"
+                    ? persons.find((candidate) => candidate.entity_id === item.entity_id)
+                    : undefined;
                   return (
                       <div
                         key={item.classification_key || `classification-${item.id}`}
@@ -607,6 +660,10 @@ export function CameraDetail({ cameras }: Props) {
                           <button
                             type="button"
                             onClick={() => {
+                              if (person) {
+                                void openPersonAlbum(person);
+                                return;
+                              }
                               setSelectedEntityId(item.entity_id);
                               setSnapshotFilter(item.category as "person" | "animal" | "vehicle");
                               setSnapshotPage(1);
@@ -614,7 +671,7 @@ export function CameraDetail({ cameras }: Props) {
                             }}
                             className="rounded-full border border-emerald-400/30 bg-emerald-500/10 px-3 py-1 text-[11px] font-semibold text-emerald-200"
                           >
-                            View {item.occurrence_count} snapshots
+                            {person ? `Open album (${item.occurrence_count})` : `View ${item.occurrence_count} snapshots`}
                           </button>
                         </div>
                       </div>
@@ -626,8 +683,54 @@ export function CameraDetail({ cameras }: Props) {
         </section>
       </div>
 
+      {selectedPerson ? (
+        <div className="fixed inset-0 z-50 overflow-y-auto bg-black/85 p-4 md:p-8" onClick={() => setSelectedPerson(null)}>
+          <section className="mx-auto max-w-6xl overflow-hidden rounded-[28px] border border-verkada-border bg-verkada-canvas" onClick={(event) => event.stopPropagation()}>
+            <header className="flex flex-wrap items-center justify-between gap-3 border-b border-verkada-border bg-verkada-surface p-5">
+              <div>
+                <p className="text-[10px] font-semibold uppercase tracking-[0.24em] text-blue-400">Person album</p>
+                <h3 className="text-xl font-semibold text-theme">{selectedPerson.display_name || "Unknown person"}</h3>
+                <code className="text-xs text-blue-400">{selectedPerson.entity_id}</code>
+              </div>
+              <button type="button" className="btn" onClick={() => setSelectedPerson(null)}>Close</button>
+            </header>
+            <div className="p-5">
+              {loadingPersonAlbum ? (
+                <div className="rounded-[20px] border border-verkada-border bg-verkada-surface p-6 text-sm text-theme-muted">Loading album…</div>
+              ) : personAlbum.length === 0 ? (
+                <div className="rounded-[20px] border border-verkada-border bg-verkada-surface p-6 text-sm text-theme-muted">This person has no retained photos.</div>
+              ) : (
+                <div className="grid gap-4 sm:grid-cols-2 lg:grid-cols-3">
+                  {personAlbum.map((appearance) => {
+                    const imagePath = appearance.person_crop_url || appearance.snapshot_url;
+                    const src = imagePath ? `${API_URL}${imagePath}` : null;
+                    const meta = `${appearance.camera_id} • ${formatPortalDateTime(appearance.created_at)} ${PORTAL_TIME_ZONE_LABEL}`;
+                    return (
+                      <button
+                        key={appearance.id}
+                        type="button"
+                        disabled={!src}
+                        onClick={() => src && setSelectedMedia({ src, title: selectedPerson.display_name || selectedPerson.entity_id, meta })}
+                        className="overflow-hidden rounded-[20px] border border-verkada-border bg-verkada-surface text-left transition hover:border-emerald-400/40 disabled:cursor-default"
+                      >
+                        {src ? (
+                          <img src={src} alt={selectedPerson.entity_id} className="h-56 w-full object-cover" />
+                        ) : (
+                          <div className="flex h-56 items-center justify-center bg-verkada-hover text-sm text-theme-muted">Photo unavailable</div>
+                        )}
+                        <div className="p-3 text-xs text-theme-muted">{meta}</div>
+                      </button>
+                    );
+                  })}
+                </div>
+              )}
+            </div>
+          </section>
+        </div>
+      ) : null}
+
       {selectedMedia ? (
-        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/85 px-4 py-6" onClick={() => setSelectedMedia(null)}>
+        <div className="fixed inset-0 z-[60] flex items-center justify-center bg-black/85 px-4 py-6" onClick={() => setSelectedMedia(null)}>
           <div className="w-full max-w-5xl overflow-hidden rounded-[28px] border border-verkada-border bg-verkada-surface shadow-2xl" onClick={(event) => event.stopPropagation()}>
             <div className="flex items-center justify-between border-b border-verkada-border px-4 py-3">
               <div>

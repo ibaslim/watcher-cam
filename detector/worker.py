@@ -9,7 +9,6 @@ Pipeline:
 from __future__ import annotations
 
 import asyncio
-import hashlib
 import logging
 import threading
 import time
@@ -200,28 +199,13 @@ def _image_laplacian_score(frame) -> float:
     return float(cv2.Laplacian(gray, cv2.CV_64F).var())
 
 
-def _face_embedding_fingerprint(embedding) -> str | None:
-    if embedding is None:
-        return None
-
-    normalized = np.asarray(embedding, dtype=np.float32)
-    norm = float(np.linalg.norm(normalized))
-    if norm <= 0.0:
-        return None
-
-    normalized = normalized / norm
-    quantized = np.clip(np.round(normalized * 63.0), 0, 127).astype(np.uint8)
-    digest = hashlib.blake2b(quantized.tobytes(), digest_size=16).hexdigest()
-    return digest
-
-
 def _should_emit_classification(*, category: str, crop_path: str | None, fingerprint: str | None) -> bool:
-    return category in {"person", "animal", "vehicle"}
+    return category in {"person", "animal", "vehicle"} and bool(crop_path or fingerprint)
 
 
-def _select_face_crop_bbox(frame, person_bbox, faces) -> tuple[tuple[int, int, int, int] | None, str | None]:
+def _select_face_crop_bbox(frame, person_bbox, faces, excluded_bboxes=None):
     if frame is None or not faces:
-        return None, None
+        return None
 
     person_x1, person_y1, person_x2, person_y2 = person_bbox
     person_w = max(1, person_x2 - person_x1)
@@ -233,6 +217,8 @@ def _select_face_crop_bbox(frame, person_bbox, faces) -> tuple[tuple[int, int, i
 
     for face in faces:
         x1, y1, x2, y2 = face.bbox
+        if excluded_bboxes is not None and (x1, y1, x2, y2) in excluded_bboxes:
+            continue
         if x2 <= x1 or y2 <= y1:
             continue
 
@@ -277,9 +263,15 @@ def _select_face_crop_bbox(frame, person_bbox, faces) -> tuple[tuple[int, int, i
             best_face = face
 
     if best_bbox is None or best_face is None:
-        return None, None
+        return None
 
-    return best_bbox, _face_embedding_fingerprint(getattr(best_face, "embedding", None))
+    embedding = np.asarray(getattr(best_face, "embedding", []), dtype=np.float32)
+    norm = float(np.linalg.norm(embedding))
+    if norm <= 0.0:
+        return None
+    embedding = embedding / norm
+    quality = float(best_score or 0.0)
+    return best_bbox, embedding, quality
 
 
 def _save_crop(frame, bbox: tuple[int, int, int, int], *, cam: CameraConfig, category: str, event_type: str, label: str | None) -> str | None:
@@ -365,22 +357,41 @@ def _best_snapshot_detection_bbox(
         src_shape=source_shape,
         dst_shape=snapshot_frame.shape,
     )
-    scaled_center = _center(scaled_source_bbox)
-    scaled_diag = _diag(scaled_source_bbox)
-
     detections = [
         item
         for item in detect_objects(snapshot_frame)
         if item.category == category
     ]
 
+    return _best_matching_bbox(
+        detections,
+        category=category,
+        source_bbox=scaled_source_bbox,
+    )
+
+
+def _best_matching_bbox(
+    detections,
+    *,
+    category: str | None,
+    source_bbox: tuple[int, int, int, int],
+) -> tuple[int, int, int, int] | None:
+    """Choose the detection nearest the event box from one detector pass."""
+
+    if category is None:
+        return None
+
+    detections = [item for item in detections if item.category == category]
+
     if not detections:
         return None
 
+    scaled_center = _center(source_bbox)
+    scaled_diag = _diag(source_bbox)
     ranked: list[tuple[float, tuple[int, int, int, int]]] = []
 
     for detection in detections:
-        overlap = _iou(scaled_source_bbox, detection.bbox)
+        overlap = _iou(source_bbox, detection.bbox)
         distance = _distance(scaled_center, _center(detection.bbox))
         near_enough = distance <= max(180.0, scaled_diag * 1.75)
 
@@ -407,6 +418,7 @@ class _Track:
     last_seen: float
     last_alert_center: tuple[float, float] | None = None
     observation_frames: list[int] | None = None
+    last_frame_index: int = -1
 
 
 class _ObjectTracker:
@@ -440,7 +452,7 @@ class _ObjectTracker:
     ) -> tuple[int, bool, str]:
         self.prune(now)
 
-        track = self._match(kind, label, bbox)
+        track = self._match(kind, label, bbox, frame_index)
         if track is None:
             track = _Track(
                 id=self._next_id,
@@ -450,6 +462,7 @@ class _ObjectTracker:
                 first_seen=now,
                 last_seen=now,
                 observation_frames=[frame_index],
+                last_frame_index=frame_index,
             )
             self._next_id += 1
             self._tracks.append(track)
@@ -460,6 +473,7 @@ class _ObjectTracker:
 
         track.bbox = bbox
         track.last_seen = now
+        track.last_frame_index = frame_index
         observations = track.observation_frames or []
         if not observations or observations[-1] != frame_index:
             observations.append(frame_index)
@@ -496,11 +510,16 @@ class _ObjectTracker:
         kind: str,
         label: str,
         bbox: tuple[int, int, int, int],
+        frame_index: int,
     ) -> _Track | None:
         best: tuple[float, _Track] | None = None
 
         for track in self._tracks:
             if track.kind != kind or track.label != label:
+                continue
+            # A track can match at most one detection in a frame. This is
+            # essential when several people appear simultaneously.
+            if track.last_frame_index == frame_index:
                 continue
 
             score = _iou(track.bbox, bbox)
@@ -576,12 +595,14 @@ async def _run_once(cam: CameraConfig) -> None:
                 detection_frame_index += 1
 
                 objects = await asyncio.to_thread(detect_objects, frame)
+                frame_faces = None
+                used_face_bboxes: set[tuple[int, int, int, int]] = set()
 
                 for obj in objects:
                     if obj.category not in {"person", "vehicle", "animal"}:
                         continue
 
-                    _track_id, should_alert, _reason = tracker.update(
+                    track_id, should_alert, _reason = tracker.update(
                         kind=obj.category,
                         label=obj.label,
                         bbox=obj.bbox,
@@ -597,6 +618,10 @@ async def _run_once(cam: CameraConfig) -> None:
                             "vehicle": "vehicle_detected",
                             "animal": "animal_detected",
                         }[obj.category]
+                        if obj.category == "person" and frame_faces is None:
+                            # Analyze once even when several people are in the
+                            # frame, then associate a different face per box.
+                            frame_faces = await asyncio.to_thread(analyze, frame)
                         await _emit(
                             client,
                             cam,
@@ -607,6 +632,10 @@ async def _run_once(cam: CameraConfig) -> None:
                             face_bbox=None,
                             confidence=obj.confidence,
                             source="yolo",
+                            track_id=track_id,
+                            faces=frame_faces or [],
+                            used_face_bboxes=used_face_bboxes,
+                            frame_detections=objects,
                         )
 
 
@@ -625,6 +654,10 @@ async def _emit(
     face_bbox: tuple[int, int, int, int] | None = None,
     confidence: float | None = None,
     source: str = "face",
+    track_id: int | None = None,
+    faces=None,
+    used_face_bboxes=None,
+    frame_detections=None,
 ) -> None:
     s = get_settings()
     ts = datetime.utcnow()
@@ -642,66 +675,97 @@ async def _emit(
         source_shape = frame.shape
 
         if snapshot_frame is not None:
-            confirmed_bbox = _best_snapshot_detection_bbox(
-                snapshot_frame,
-                event_type=event_type,
-                label=label,
-                source_bbox=bbox,
-                source_shape=source_shape,
+            snapshot_detections = detect_objects(snapshot_frame)
+            confirmed_bbox = _best_matching_bbox(
+                snapshot_detections,
+                category=_event_detection_category(event_type),
+                source_bbox=_scale_bbox(bbox, src_shape=source_shape, dst_shape=snapshot_frame.shape),
             )
 
             if confirmed_bbox is not None:
                 annotated = snapshot_frame.copy()
                 draw_bbox = confirmed_bbox
                 draw_face_bbox = None
+                draw_detections = snapshot_detections
             else:
                 annotated = frame.copy()
                 draw_bbox = bbox
                 draw_face_bbox = face_bbox
+                draw_detections = frame_detections or []
         else:
             annotated = frame.copy()
             draw_bbox = bbox
             draw_face_bbox = face_bbox
+            draw_detections = frame_detections or []
 
         if event_type in {"person_detected", "vehicle_detected", "animal_detected"}:
             color = (0, 200, 0)
         else:
             color = (0, 0, 220)
 
-        crop_path = None
-        fingerprint = None
         crop_category = _event_detection_category(event_type)
 
         if crop_category is not None:
+            person_crop_path = _save_crop(
+                frame, bbox, cam=cam, category=crop_category,
+                event_type=event_type, label=label,
+            )
+            face_crop_path = None
+            embedding = None
+            face_quality = None
             if crop_category == "person":
-                faces = analyze(frame)
-                _selected_bbox, fingerprint = _select_face_crop_bbox(frame, bbox, faces)
+                selected = _select_face_crop_bbox(frame, bbox, faces or [], used_face_bboxes)
+                if selected is not None:
+                    selected_bbox, selected_embedding, face_quality = selected
+                    if used_face_bboxes is not None:
+                        used_face_bboxes.add(selected_bbox)
+                    face_crop_path = _save_crop(
+                        frame, selected_bbox, cam=cam, category="face",
+                        event_type=event_type, label=label,
+                    )
+                    embedding = selected_embedding.tolist()
 
-            crop_artifact = {
-                "crop_path": None,
-                "fingerprint": fingerprint,
+            # Mutate the outer dictionary; assignment here would create a
+            # nested-function local and silently suppress classification.
+            crop_artifact.update({
+                "crop_path": person_crop_path,
+                "person_crop_path": person_crop_path,
+                "face_crop_path": face_crop_path,
+                "embedding": embedding,
+                "face_quality": face_quality,
+                # The backend uses the full embedding for people. This marker
+                # only lets the generic emission guard know biometric evidence
+                # exists when a full-body crop was rejected.
+                "fingerprint": "embedding" if embedding is not None else None,
                 "category": crop_category,
-            }
+            })
 
-        x1, y1, x2, y2 = draw_bbox
-        cv2.rectangle(annotated, (x1, y1), (x2, y2), color, 2)
+        relevant_detections = [
+            detection for detection in draw_detections
+            if detection.category == crop_category
+        ]
+        boxes_to_draw = relevant_detections or [None]
+        for detection in boxes_to_draw:
+            detection_bbox = detection.bbox if detection is not None else draw_bbox
+            x1, y1, x2, y2 = detection_bbox
+            cv2.rectangle(annotated, (x1, y1), (x2, y2), color, 2)
+
+            detection_label = detection.label if detection is not None else label
+            detection_score = detection.confidence if detection is not None else confidence
+            caption = detection_label if detection_score is None else f"{detection_label} {detection_score:.2f}"
+            cv2.putText(
+                annotated,
+                caption,
+                (x1, max(y1 - 8, 15)),
+                cv2.FONT_HERSHEY_SIMPLEX,
+                0.6,
+                color,
+                2,
+            )
 
         if draw_face_bbox:
             fx1, fy1, fx2, fy2 = draw_face_bbox
             cv2.rectangle(annotated, (fx1, fy1), (fx2, fy2), (255, 200, 0), 2)
-
-        score = confidence
-        caption = label if score is None else f"{label} {score:.2f}"
-
-        cv2.putText(
-            annotated,
-            caption,
-            (x1, max(y1 - 8, 15)),
-            cv2.FONT_HERSHEY_SIMPLEX,
-            0.6,
-            color,
-            2,
-        )
 
         full_path.parent.mkdir(parents=True, exist_ok=True)
         cv2.imwrite(str(full_path), annotated)
@@ -732,7 +796,7 @@ async def _emit(
         except Exception:
             event_id = None
 
-        if _should_emit_classification(
+        if str(crop_artifact.get("category") or "") == "person" or _should_emit_classification(
             category=str(crop_artifact.get("category") or ""),
             crop_path=str(crop_artifact.get("crop_path") or ""),
             fingerprint=crop_artifact.get("fingerprint"),
@@ -749,6 +813,12 @@ async def _emit(
                     "event_id": event_id,
                     "confidence": confidence,
                     "source_event_type": event_type,
+                    "embedding": crop_artifact.get("embedding"),
+                    "person_crop_path": crop_artifact.get("person_crop_path"),
+                    "face_crop_path": crop_artifact.get("face_crop_path"),
+                    "face_quality": crop_artifact.get("face_quality"),
+                    "track_id": track_id,
+                    "model_name": s.face_model,
                 },
             )
             if classification_resp.status_code >= 400:

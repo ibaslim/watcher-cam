@@ -152,6 +152,43 @@ export type ClassificationRow = {
   classification_key: string;
 };
 
+export type PersonIdentityRow = {
+  entity_id: string;
+  display_name: string | null;
+  status: string;
+  image_url: string | null;
+  appearance_count: number;
+  first_seen: string;
+  last_seen: string;
+};
+
+export type PersonAppearanceRow = {
+  id: number;
+  entity_id: string;
+  event_id: number | null;
+  camera_id: string;
+  track_id: number | null;
+  snapshot_url: string | null;
+  person_crop_url: string | null;
+  face_crop_url: string | null;
+  match_score: number | null;
+  face_quality: number | null;
+  match_method: string;
+  created_at: string;
+};
+
+export type AmbiguousAppearanceRow = {
+  id: number;
+  entity_id: string;
+  event_id: number | null;
+  camera_id: string;
+  track_id: number | null;
+  snapshot_url: string | null;
+  person_crop_url: string | null;
+  reason: string;
+  created_at: string;
+};
+
 export type ReportSummary = {
   total_events: number;
   intrusion: number;
@@ -273,6 +310,26 @@ export const fetchClassifications = (
   if (filters.date_to) p.set("date_to", filters.date_to);
 
   return fetch(`${API_URL}/api/events/classifications?${p.toString()}`, authed()).then((r) => ok<ClassificationRow[]>(r));
+};
+
+export const fetchPersons = (cameraId?: string, filters: ClassificationFilters = {}) => {
+  const p = new URLSearchParams();
+  if (cameraId) p.set("camera_id", cameraId);
+  if (filters.date_from) p.set("date_from", filters.date_from);
+  if (filters.date_to) p.set("date_to", filters.date_to);
+  return fetch(`${API_URL}/api/events/persons?${p.toString()}`, authed()).then((r) => ok<PersonIdentityRow[]>(r));
+};
+
+export const fetchPersonAppearances = (entityId: string, cameraId?: string) => {
+  const p = new URLSearchParams();
+  if (cameraId) p.set("camera_id", cameraId);
+  return fetch(`${API_URL}/api/events/persons/${encodeURIComponent(entityId)}/appearances?${p.toString()}`, authed()).then((r) => ok<PersonAppearanceRow[]>(r));
+};
+
+export const fetchAmbiguousAppearances = (cameraId?: string) => {
+  const p = new URLSearchParams();
+  if (cameraId) p.set("camera_id", cameraId);
+  return fetch(`${API_URL}/api/events/ambiguous?${p.toString()}`, authed()).then((r) => ok<AmbiguousAppearanceRow[]>(r));
 };
 export async function ptzMove(id: string, dir: string): Promise<void> {
   await fetch(`${API_URL}/api/ptz/${id}/move/${dir}`, authed({ method: "POST" }));
