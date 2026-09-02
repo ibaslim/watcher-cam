@@ -5,6 +5,7 @@ from __future__ import annotations
 import logging
 from datetime import datetime, timedelta
 import hashlib
+from uuid import uuid4
 from typing import Literal
 
 from fastapi import APIRouter
@@ -13,8 +14,9 @@ from sqlalchemy import select
 
 from app.api.ws import broadcast
 from app.db import session_scope
-from app.models import CameraClassification, Event
+from app.models import AmbiguousAppearance, CameraClassification, Event
 from app.services import alerts
+from app.services.person_identity import identify_and_record
 
 log = logging.getLogger(__name__)
 router = APIRouter()
@@ -42,6 +44,12 @@ class ClassificationIn(BaseModel):
     event_id: int | None = None
     confidence: float | None = Field(default=None, ge=0.0, le=1.0)
     source_event_type: str | None = None
+    embedding: list[float] | None = Field(default=None, min_length=32, max_length=2048)
+    face_crop_path: str | None = None
+    person_crop_path: str | None = None
+    face_quality: float | None = Field(default=None, ge=0.0)
+    track_id: int | None = None
+    face_model: str = Field(default="buffalo_l", alias="model_name")
 
 
 async def _save_and_broadcast(
@@ -225,6 +233,53 @@ def _upsert_classification_from_event(
 @router.post("/classifications")
 def ingest_classification(payload: ClassificationIn) -> dict:
     with session_scope() as db:
+        if payload.category == "person" and payload.embedding and payload.event_id is not None:
+            event = db.get(Event, payload.event_id)
+            if event is not None:
+                identity = identify_and_record(
+                    db,
+                    embedding=payload.embedding,
+                    camera_id=payload.camera_id,
+                    event=event,
+                    track_id=payload.track_id,
+                    snapshot_path=event.snapshot_path,
+                    person_crop_path=payload.person_crop_path,
+                    face_crop_path=payload.face_crop_path,
+                    face_quality=payload.face_quality,
+                    model_name=payload.face_model,
+                )
+                if identity is not None:
+                    return {
+                        "ok": True,
+                        "created": identity.created,
+                        "classification_id": None,
+                        "entity_id": identity.public_id,
+                        "match_score": identity.match_score,
+                        "ambiguous": identity.ambiguous,
+                    }
+
+        if payload.category == "person" and payload.event_id is not None:
+            event = db.get(Event, payload.event_id)
+            if event is not None:
+                ambiguous_id = f"ambiguous-{uuid4().hex[:12]}"
+                event.entity_id = ambiguous_id
+                db.add(AmbiguousAppearance(
+                    public_id=ambiguous_id,
+                    event_id=event.id,
+                    camera_id=payload.camera_id,
+                    track_id=payload.track_id,
+                    snapshot_path=event.snapshot_path,
+                    person_crop_path=payload.person_crop_path,
+                    reason="no_usable_face",
+                ))
+                return {
+                    "ok": True,
+                    "created": True,
+                    "classification_id": None,
+                    "entity_id": ambiguous_id,
+                    "ambiguous": True,
+                }
+
         item_id, created, entity_id = _upsert_classification_from_event(
             db,
             camera_id=payload.camera_id,

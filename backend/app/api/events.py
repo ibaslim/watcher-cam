@@ -21,7 +21,7 @@ from sqlalchemy.orm import Session
 from app.api.auth import require_admin
 from app.config import get_settings
 from app.db import get_db
-from app.models import CameraClassification, Event, User
+from app.models import AmbiguousAppearance, CameraClassification, Event, PersonAppearance, PersonIdentity, User
 
 router = APIRouter()
 LEGACY_GUARD_EVENT_TYPES = ("guard_present", "guard_absent", "wrong_guard", "unknown_person")
@@ -455,6 +455,107 @@ def list_classifications(
     classifications = _build_snapshot_classifications(rows, snapshot_dir=get_settings().snapshot_dir)
 
     return classifications[:limit] if limit is not None else classifications
+
+
+@router.get("/persons")
+def list_persons(
+    db: Annotated[Session, Depends(get_db)],
+    camera_id: str | None = None,
+    date_from: datetime | None = Query(None),
+    date_to: datetime | None = Query(None),
+    limit: int = Query(100, ge=1, le=500),
+) -> list[dict]:
+    """List persistent face identities, optionally scoped by appearance."""
+    stmt = select(PersonIdentity).order_by(PersonIdentity.last_seen.desc())
+    identities = db.scalars(stmt).all()
+    rows: list[dict] = []
+    lower = _local_boundary_to_utc(date_from)
+    upper = _local_boundary_to_utc(date_to)
+
+    for identity in identities:
+        appearances_stmt = select(PersonAppearance).where(PersonAppearance.person_id == identity.id)
+        if camera_id:
+            appearances_stmt = appearances_stmt.where(PersonAppearance.camera_id == camera_id)
+        if lower:
+            appearances_stmt = appearances_stmt.where(PersonAppearance.created_at >= lower)
+        if upper:
+            appearances_stmt = appearances_stmt.where(PersonAppearance.created_at <= upper)
+        appearances = db.scalars(appearances_stmt.order_by(PersonAppearance.created_at.desc())).all()
+        if (camera_id or lower or upper) and not appearances:
+            continue
+        representative = appearances[0].snapshot_path if appearances else identity.representative_image_path
+        rows.append({
+            "entity_id": identity.public_id,
+            "display_name": identity.display_name,
+            "status": identity.status,
+            "image_url": f"/snapshots/{Path(representative).name}" if representative else None,
+            "appearance_count": len(appearances) if (camera_id or lower or upper) else identity.appearance_count,
+            "first_seen": identity.first_seen.isoformat() + "Z",
+            "last_seen": identity.last_seen.isoformat() + "Z",
+        })
+        if len(rows) >= limit:
+            break
+    return rows
+
+
+@router.get("/persons/{public_id}/appearances")
+def list_person_appearances(
+    public_id: str,
+    db: Annotated[Session, Depends(get_db)],
+    camera_id: str | None = None,
+    limit: int = Query(200, ge=1, le=1000),
+) -> list[dict]:
+    identity = db.scalar(select(PersonIdentity).where(PersonIdentity.public_id == public_id))
+    if identity is None:
+        raise HTTPException(404, "person identity not found")
+    stmt = select(PersonAppearance).where(PersonAppearance.person_id == identity.id)
+    if camera_id:
+        stmt = stmt.where(PersonAppearance.camera_id == camera_id)
+    appearances = db.scalars(stmt.order_by(PersonAppearance.created_at.desc()).limit(limit)).all()
+    return [{
+        "id": row.id,
+        "entity_id": public_id,
+        "event_id": row.event_id,
+        "camera_id": row.camera_id,
+        "track_id": row.track_id,
+        "snapshot_url": f"/snapshots/{Path(row.snapshot_path).name}" if row.snapshot_path else None,
+        "person_crop_url": f"/snapshots/{Path(row.person_crop_path).name}" if row.person_crop_path else None,
+        "face_crop_url": f"/snapshots/{Path(row.face_crop_path).name}" if row.face_crop_path else None,
+        "match_score": row.match_score,
+        "face_quality": row.face_quality,
+        "match_method": row.match_method,
+        "created_at": row.created_at.isoformat() + "Z",
+    } for row in appearances]
+
+
+@router.get("/ambiguous")
+def list_ambiguous_appearances(
+    db: Annotated[Session, Depends(get_db)],
+    camera_id: str | None = None,
+    date_from: datetime | None = Query(None),
+    date_to: datetime | None = Query(None),
+    limit: int = Query(200, ge=1, le=1000),
+) -> list[dict]:
+    """List people whose face could not safely be identified."""
+    stmt = select(AmbiguousAppearance).order_by(AmbiguousAppearance.created_at.desc())
+    if camera_id:
+        stmt = stmt.where(AmbiguousAppearance.camera_id == camera_id)
+    if date_from:
+        stmt = stmt.where(AmbiguousAppearance.created_at >= _local_boundary_to_utc(date_from))
+    if date_to:
+        stmt = stmt.where(AmbiguousAppearance.created_at <= _local_boundary_to_utc(date_to))
+    rows = db.scalars(stmt.limit(limit)).all()
+    return [{
+        "id": row.id,
+        "entity_id": row.public_id,
+        "event_id": row.event_id,
+        "camera_id": row.camera_id,
+        "track_id": row.track_id,
+        "snapshot_url": f"/snapshots/{Path(row.snapshot_path).name}" if row.snapshot_path else None,
+        "person_crop_url": f"/snapshots/{Path(row.person_crop_path).name}" if row.person_crop_path else None,
+        "reason": row.reason,
+        "created_at": row.created_at.isoformat() + "Z",
+    } for row in rows]
 
 
 @router.delete("/bulk")

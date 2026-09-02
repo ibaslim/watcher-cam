@@ -3,7 +3,7 @@ import { Users } from "./pages/Users";
 import { Reports } from "./pages/Reports";
 import { Events } from "./pages/Events";
 import { useEffect, useState } from "react";
-import { BrowserRouter, Route, Routes, useLocation } from "react-router-dom";
+import { BrowserRouter, Navigate, Route, Routes, useLocation } from "react-router-dom";
 import {
     Camera,
     CurrentUser,
@@ -181,6 +181,7 @@ function AppShell({
 
                 <Route path="/users" element={isAdmin ? <Users /> : <Forbidden />} />
                 <Route path="/events" element={<Events events={events} cameras={cameras} />} />
+                <Route path="/persons" element={<Navigate to="/" replace />} />
                 <Route path="/recordings" element={<Recordings />} />
                 <Route path="/reports" element={<Reports />} />
                 <Route path="/cameras/:cameraId" element={<CameraDetail cameras={cameras} />} />

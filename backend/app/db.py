@@ -67,6 +67,9 @@ def _apply_sqlite_additive_migrations() -> None:
 
         connection.execute(text("CREATE INDEX IF NOT EXISTS ix_events_entity_id ON events (entity_id)"))
         connection.execute(text("CREATE INDEX IF NOT EXISTS ix_camera_classifications_entity_id ON camera_classifications (entity_id)"))
+        connection.execute(text("CREATE INDEX IF NOT EXISTS ix_person_embeddings_person_id ON person_embeddings (person_id)"))
+        connection.execute(text("CREATE INDEX IF NOT EXISTS ix_person_appearances_person_id ON person_appearances (person_id)"))
+        connection.execute(text("CREATE INDEX IF NOT EXISTS ix_ambiguous_appearances_camera_id ON ambiguous_appearances (camera_id)"))
 
         connection.execute(
             text(

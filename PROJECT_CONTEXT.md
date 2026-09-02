@@ -69,6 +69,7 @@ Specialized documentation:
 - `backend/app/services/alerts.py`: notification policy and email delivery.
 - `backend/app/services/recording.py`: MP4 recording.
 - `backend/app/services/retention.py`: snapshot and recording cleanup.
+- `backend/app/services/person_identity.py`: persistent ArcFace identity matching and appearance albums.
 
 ### Detector
 
@@ -94,6 +95,7 @@ Specialized documentation:
 - `frontend/src/pages/CameraSettings.tsx`: post and alert settings.
 - `frontend/src/pages/Guards.tsx`: guard enrollment.
 - `frontend/src/pages/Events.tsx`: event history.
+- `frontend/src/pages/Persons.tsx`: global person albums and ambiguous detections.
 - `frontend/src/pages/Recordings.tsx`: recording browser.
 - `frontend/src/pages/Reports.tsx`: reports and exports.
 - `frontend/src/pages/Users.tsx`: user administration.
@@ -176,6 +178,10 @@ Core tables are defined in `backend/app/models.py`:
 - `cameras`: connection, stream, detection, and recording settings
 - `camera_posts`: assigned guards, duty hours, thresholds, alert switches
 - `events`: AI, presence, and Hikvision events with snapshots
+- `person_identities`: global provisional/confirmed person identities
+- `person_embeddings`: normalized ArcFace templates used for cosine matching
+- `person_appearances`: event-linked entries in each person's gallery album
+- `ambiguous_appearances`: person detections without a usable face embedding
 
 Route ownership:
 
@@ -253,6 +259,7 @@ Before production: set a strong dashboard password, terminate TLS at a reverse p
 - New event type: update detector emission, backend persistence/alert policy, frontend display, and report filters.
 - New frontend page: add the page under `frontend/src/pages/`, route it in `frontend/src/App.tsx`, and add navigation if needed.
 - Face behavior: inspect `detector/face.py`, `detector/face_bank.py`, and `detector/config.py`.
+- Persistent person-gallery behavior: see `PERSON_IDENTITY_GALLERY_README.md`, `detector/worker.py`, and `backend/app/services/person_identity.py`.
 - Stream behavior: inspect `backend/app/services/mediamtx.py`, `mediamtx/`, and `frontend/src/lib/whep.ts`.
 
 Always validate the touched slice first, then run a broader Docker or frontend build when the change crosses service boundaries.
