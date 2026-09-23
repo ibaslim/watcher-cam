@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useRef, useState } from "react";
+import { useEffect, useMemo, useRef, useState, type MouseEvent } from "react";
 import { useSearchParams } from "react-router-dom";
 import {
   API_URL,
@@ -49,6 +49,7 @@ function findClip(day: RecordingDay | null, second: number): RecordingTimelineCl
 export function Recordings() {
   const [params, setParams] = useSearchParams();
   const videoRef = useRef<HTMLVideoElement>(null);
+  const videoStageRef = useRef<HTMLDivElement>(null);
   const [cameras, setCameras] = useState<Camera[]>([]);
   const cameraId = params.get("camera") || cameras[0]?.id || "";
   const at = params.get("at") || "";
@@ -64,6 +65,12 @@ export function Recordings() {
   const [cameraError, setCameraError] = useState("");
   const [revision, setRevision] = useState(0);
   const [autoRetry, setAutoRetry] = useState(0);
+  const [isPlaying, setIsPlaying] = useState(false);
+  const [videoTime, setVideoTime] = useState(0);
+  const [videoDuration, setVideoDuration] = useState(0);
+  const [zoom, setZoom] = useState(1);
+  const [pointerEnabled, setPointerEnabled] = useState(false);
+  const [pointerPosition, setPointerPosition] = useState<{ x: number; y: number } | null>(null);
 
   useEffect(() => {
     let cancelled = false;
@@ -138,6 +145,14 @@ export function Recordings() {
     setAutoRetry(0);
   }, [cameraId, at]);
 
+  useEffect(() => {
+    setIsPlaying(false);
+    setVideoTime(0);
+    setVideoDuration(0);
+    setZoom(1);
+    setPointerPosition(null);
+  }, [selected?.url]);
+
   const load = () => { setAutoRetry(0); setRevision(value => value + 1); };
 
   function browse(nextCamera: string, nextDay: string) {
@@ -166,6 +181,41 @@ export function Recordings() {
       video.currentTime = Math.max(0, clamped - clip.start_second);
       if (play) void video.play().catch(() => undefined);
     }
+  }
+
+  function togglePlayback() {
+    const video = videoRef.current;
+    if (!video) return;
+
+    if (video.paused) {
+      void video.play().catch(() => undefined);
+    } else {
+      video.pause();
+    }
+  }
+
+  function seekWithinClip(nextTime: number) {
+    const video = videoRef.current;
+    if (!video || !selected) return;
+    const clamped = Math.max(0, Math.min(videoDuration || selected.duration_seconds || 0, nextTime));
+    video.currentTime = clamped;
+    setVideoTime(clamped);
+    setTimelineSecond(Math.max(0, Math.min(DAY_SECONDS - 1, selected.start_second + clamped)));
+  }
+
+  function changeZoom(nextZoom: number) {
+    setZoom(Math.max(1, Math.min(4, Number(nextZoom.toFixed(2)))));
+  }
+
+  function handleVideoPointer(event: MouseEvent<HTMLDivElement>) {
+    if (!pointerEnabled) return;
+    const bounds = event.currentTarget.getBoundingClientRect();
+    const x = ((event.clientX - bounds.left) / bounds.width) * 100;
+    const y = ((event.clientY - bounds.top) / bounds.height) * 100;
+    setPointerPosition({
+      x: Math.max(0, Math.min(100, x)),
+      y: Math.max(0, Math.min(100, y)),
+    });
   }
 
   const activeClipOffset = selected ? Math.max(0, timelineSecond - selected.start_second) : 0;
@@ -209,29 +259,93 @@ export function Recordings() {
           <div className="recording-player">
             {selected ? (
               <>
-                <video
-                  ref={videoRef}
-                  key={selected.url}
-                  src={`${API_URL}${selected.url}`}
-                  controls
-                  autoPlay
-                  playsInline
-                  className="recording-video"
-                  onLoadedMetadata={(event) => {
-                    if (pendingSecond == null) return;
-                    event.currentTarget.currentTime = Math.max(0, pendingSecond - selected.start_second);
-                  }}
-                  onTimeUpdate={(event) => {
-                    setTimelineSecond(Math.max(0, Math.min(DAY_SECONDS - 1, selected.start_second + event.currentTarget.currentTime)));
-                  }}
-                  onEnded={() => {
-                    if (!day) return;
-                    const nextSecond = Math.min(DAY_SECONDS - 1, selected.end_second + 0.01);
-                    const nextClip = findClip(day, nextSecond);
-                    if (nextClip) seekTo(nextSecond, true);
-                  }}
-                  onError={() => setError("This recording cannot be played yet. It may still be saving or is no longer available. Please retry.")}
-                />
+                <div
+                  ref={videoStageRef}
+                  className={`recording-video-stage ${pointerEnabled ? "pointer-enabled" : ""}`}
+                  onClick={handleVideoPointer}
+                >
+                  <video
+                    ref={videoRef}
+                    key={selected.url}
+                    src={`${API_URL}${selected.url}`}
+                    controls={false}
+                    autoPlay
+                    playsInline
+                    className="recording-video"
+                    style={{ transform: `scale(${zoom})` }}
+                    onLoadedMetadata={(event) => {
+                      const nextDuration = Number.isFinite(event.currentTarget.duration) ? event.currentTarget.duration : selected.duration_seconds;
+                      setVideoDuration(nextDuration || 0);
+                      if (pendingSecond == null) return;
+                      const nextTime = Math.max(0, pendingSecond - selected.start_second);
+                      event.currentTarget.currentTime = nextTime;
+                      setVideoTime(nextTime);
+                    }}
+                    onPlay={() => setIsPlaying(true)}
+                    onPause={() => setIsPlaying(false)}
+                    onTimeUpdate={(event) => {
+                      setVideoTime(event.currentTarget.currentTime);
+                      setTimelineSecond(Math.max(0, Math.min(DAY_SECONDS - 1, selected.start_second + event.currentTarget.currentTime)));
+                    }}
+                    onEnded={() => {
+                      setIsPlaying(false);
+                      if (!day) return;
+                      const nextSecond = Math.min(DAY_SECONDS - 1, selected.end_second + 0.01);
+                      const nextClip = findClip(day, nextSecond);
+                      if (nextClip) seekTo(nextSecond, true);
+                    }}
+                    onError={() => setError("This recording cannot be played yet. It may still be saving or is no longer available. Please retry.")}
+                  />
+                  {pointerPosition ? (
+                    <span
+                      className="recording-pointer"
+                      style={{ left: `${pointerPosition.x}%`, top: `${pointerPosition.y}%` }}
+                      aria-hidden="true"
+                    />
+                  ) : null}
+                  <div className="recording-zoom-badge">{Math.round(zoom * 100)}%</div>
+                </div>
+
+                <div className="recording-controls">
+                  <button type="button" className="recording-control-button primary" onClick={togglePlayback}>
+                    {isPlaying ? "Pause" : "Play"}
+                  </button>
+                  <button type="button" className="recording-control-button" onClick={() => seekWithinClip(videoTime - 10)}>
+                    -10s
+                  </button>
+                  <button type="button" className="recording-control-button" onClick={() => seekWithinClip(videoTime + 10)}>
+                    +10s
+                  </button>
+                  <span className="recording-time-readout">
+                    {timeLabel(activeClipOffset)} / {timeLabel(Math.max(0, selected.duration_seconds))}
+                  </span>
+                  <input
+                    className="recording-clip-scrubber"
+                    type="range"
+                    min={0}
+                    max={Math.max(1, videoDuration || selected.duration_seconds || 1)}
+                    step={0.1}
+                    value={Math.min(videoTime, Math.max(1, videoDuration || selected.duration_seconds || 1))}
+                    onChange={(event) => seekWithinClip(Number(event.target.value))}
+                    aria-label="Current segment timeline"
+                  />
+                  <button type="button" className="recording-control-button" onClick={() => changeZoom(zoom - 0.25)} disabled={zoom <= 1}>
+                    Zoom -
+                  </button>
+                  <button type="button" className="recording-control-button" onClick={() => changeZoom(zoom + 0.25)} disabled={zoom >= 4}>
+                    Zoom +
+                  </button>
+                  <button type="button" className="recording-control-button" onClick={() => { changeZoom(1); setPointerPosition(null); }}>
+                    Reset
+                  </button>
+                  <button
+                    type="button"
+                    className={`recording-control-button ${pointerEnabled ? "active" : ""}`}
+                    onClick={() => setPointerEnabled((value) => !value)}
+                  >
+                    Pointer
+                  </button>
+                </div>
 
                 <div className="recording-player-info">
                   <div>
