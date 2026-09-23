@@ -13,6 +13,7 @@ from app.api import (
     alarm,
     auth,
     cameras,
+    sites,
     detections,
     events,
     ptz,
@@ -106,6 +107,7 @@ app.include_router(auth.router, prefix="/api/auth", tags=["auth"])
 
 protected = [Depends(auth.require_auth)]
 
+app.include_router(sites.router, prefix="/api/sites", tags=["sites"], dependencies=protected)
 app.include_router(cameras.router, prefix="/api/cameras", tags=["cameras"], dependencies=protected)
 app.include_router(events.router, prefix="/api/events", tags=["events"], dependencies=protected)
 app.include_router(ptz.router, prefix="/api/ptz", tags=["ptz"], dependencies=protected)

@@ -236,7 +236,7 @@ def _normalize_classification_category(value: str | None) -> str | None:
         return "person"
     if raw.startswith("animal") or raw in {"cat", "dog", "bird", "horse", "cow", "sheep"}:
         return "animal"
-    if raw.startswith("vehicle") or raw in {"car", "truck", "bus", "van", "motorbike", "bicycle"}:
+    if raw.startswith("vehicle") or raw in {"car", "truck", "bus", "van", "motorbike", "motorcycle", "bicycle"}:
         return "vehicle"
     return None
 

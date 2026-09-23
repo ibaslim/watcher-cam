@@ -6,6 +6,8 @@ import { useEffect, useState } from "react";
 import { BrowserRouter, Route, Routes, useLocation } from "react-router-dom";
 import {
     Camera,
+    Site,
+    fetchSites,
     CurrentUser,
     EventRow,
     fetchAuthStatus,
@@ -15,11 +17,11 @@ import {
     getToken,
     setToken,
 } from "./lib/api";
-import { connectEvents, notify, requestDesktopNotifications, WsEvent } from "./lib/ws";
+import { connectEvents, WsEvent } from "./lib/ws";
 import { NavBar } from "./components/NavBar";
 import { SessionTimeout } from "./components/SessionTimeout";
 import { Dashboard } from "./pages/Dashboard";
-import { CamerasAdmin } from "./pages/CamerasAdmin";
+import { SitesAdmin } from "./pages/SitesAdmin";
 import { Login } from "./pages/Login";
 import { CameraDetail } from "./pages/CameraDetail";
 import { isPortalToday, portalTodayApiRange } from "./lib/time";
@@ -29,6 +31,8 @@ export function App() {
     const [authState, setAuthState] = useState<AuthState>("checking");
     const [user, setUser] = useState<CurrentUser | null>(null);
     const [cameras, setCameras] = useState<Camera[]>([]);
+    const [sites, setSites] = useState<Site[]>([]);
+    const [sitesError, setSitesError] = useState("");
     const [events, setEvents] = useState<EventRow[]>([]);
     const [online, setOnline] = useState(false);
 
@@ -68,15 +72,18 @@ export function App() {
         };
     }, []);
 
-    const refreshCameras = () =>
-        fetchCameras().then(setCameras).catch(() => setCameras([]));
+    const refreshCameras = async () => {
+        try {
+            const [nextCameras, nextSites] = await Promise.all([fetchCameras(), fetchSites()]);
+            setCameras(nextCameras); setSites(nextSites); setSitesError("");
+        } catch (e) { setSitesError((e as Error).message); }
+    };
 
     useEffect(() => {
         if (authState !== "ok") return;
 
         refreshCameras();
         fetchEvents(portalTodayApiRange()).then(setEvents).catch(() => setEvents([]));
-        requestDesktopNotifications();
 
         const disconnect = connectEvents(
             (e: WsEvent) => {
@@ -101,11 +108,6 @@ export function App() {
                         ...prev.filter((event) => isPortalToday(event.created_at)),
                     ];
                 });
-
-                notify(
-                    `${e.label || e.event_type} — ${e.camera_id}`,
-                    `${e.source}${e.confidence ? ` · ${(e.confidence * 100).toFixed(0)}%` : ""}`,
-                );
             },
             (status) => {
                 setOnline(status === "open");
@@ -132,6 +134,8 @@ export function App() {
     return (
         <BrowserRouter>
             <AppShell
+                sites={sites}
+                sitesError={sitesError}
                 online={online}
                 cameras={cameras}
                 events={events}
@@ -143,12 +147,15 @@ export function App() {
 }
 
 function AppShell({
+    sites, sitesError,
     online,
     cameras,
     events,
     onCamerasChanged,
     user,
 }: {
+    sites: Site[];
+    sitesError: string;
     online: boolean;
     cameras: Camera[];
     events: EventRow[];
@@ -160,10 +167,12 @@ function AppShell({
 
     return (
         <div className="min-h-screen bg-verkada-canvas text-theme font-sans flex flex-col">
-            <NavBar online={online} user={user} />
+            <NavBar online={online} user={user} sites={sites} cameras={cameras} />
+            <div className="app-content">
+            {sitesError && <div role="alert" className="alert alert-error">Could not load sites and cameras. {sitesError} <button className="btn" onClick={onCamerasChanged}>Retry</button></div>}
             <SessionTimeout />
 
-            <Dashboard cameras={cameras} events={events} hidden={location.pathname !== "/"} />
+            <Dashboard sites={sites} isAdmin={isAdmin} cameras={cameras} events={events} hidden={location.pathname !== "/"} />
 
             <Routes>
                 <Route path="/" element={null} />
@@ -172,7 +181,7 @@ function AppShell({
                     path="/cameras"
                     element={
                         isAdmin ? (
-                            <CamerasAdmin onCamerasChanged={onCamerasChanged} />
+                            <SitesAdmin sites={sites} onChanged={onCamerasChanged} />
                         ) : (
                             <Forbidden />
                         )
@@ -185,6 +194,7 @@ function AppShell({
                 <Route path="/reports" element={<Reports />} />
                 <Route path="/cameras/:cameraId" element={<CameraDetail cameras={cameras} />} />
             </Routes>
+            </div>
         </div>
     );
 }

@@ -66,7 +66,7 @@ export async function startWhep(
       if (pc.iceGatheringState === "complete") finish();
     };
     pc.addEventListener("icegatheringstatechange", check);
-    timer = setTimeout(finish, 1500);
+    timer = setTimeout(finish, 350);
   });
 
   const url = `${mediamtxUrl.replace(/\/$/, "")}/${path}/whep`;

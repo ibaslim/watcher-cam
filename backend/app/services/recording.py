@@ -44,6 +44,10 @@ class Recorder:
 
         return str(folder / f"{now.strftime('%H-%M-%S')}.mp4")
 
+    def _source_url(self) -> str:
+        """Record the normalized MediaMTX path used by live view and detection."""
+        return get_settings().mediamtx_rtsp_url(self.camera.id)
+
     async def start(self) -> None:
         while self.running:
             try:
@@ -78,10 +82,12 @@ class Recorder:
             "-rtsp_transport",
             "tcp",
             "-i",
-            self.camera.rtsp_url,
+            self._source_url(),
             "-an",
             "-c:v",
             "copy",
+            "-movflags",
+            "+frag_keyframe+empty_moov+default_base_moof",
             "-t",
             str(s.recording_segment_seconds),
             output,

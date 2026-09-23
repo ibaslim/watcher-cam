@@ -24,6 +24,7 @@ SessionLocal = sessionmaker(bind=engine, autoflush=False, autocommit=False, futu
 def init_db() -> None:
     Base.metadata.create_all(engine)
     _apply_sqlite_additive_migrations()
+    _backfill_camera_sites()
 
 
 def _apply_sqlite_additive_migrations() -> None:
@@ -33,6 +34,7 @@ def _apply_sqlite_additive_migrations() -> None:
     with engine.begin() as connection:
         camera_columns = {column["name"] for column in inspect(engine).get_columns("cameras")}
         camera_additions = {
+            "site_id": "VARCHAR(64) REFERENCES sites(id)",
             "recorder_id": "VARCHAR(64) NOT NULL DEFAULT ''",
             "recorder_name": "VARCHAR(128) NOT NULL DEFAULT ''",
         }
@@ -46,6 +48,7 @@ def _apply_sqlite_additive_migrations() -> None:
         event_columns = {column["name"] for column in inspect(engine).get_columns("events")}
         event_additions = {
             "entity_id": "VARCHAR(64)",
+            "track_id": "VARCHAR(96)",
         }
 
         for name, definition in event_additions.items():
@@ -66,7 +69,10 @@ def _apply_sqlite_additive_migrations() -> None:
                 )
 
         connection.execute(text("CREATE INDEX IF NOT EXISTS ix_events_entity_id ON events (entity_id)"))
+        connection.execute(text("CREATE INDEX IF NOT EXISTS ix_events_track_id ON events (track_id)"))
         connection.execute(text("CREATE INDEX IF NOT EXISTS ix_camera_classifications_entity_id ON camera_classifications (entity_id)"))
+        connection.execute(text("CREATE INDEX IF NOT EXISTS ix_detection_tracks_camera_track ON detection_tracks (camera_id, track_id)"))
+        connection.execute(text("CREATE INDEX IF NOT EXISTS ix_detection_tracks_camera_seen ON detection_tracks (camera_id, first_seen, last_seen)"))
 
         connection.execute(
             text(
@@ -128,3 +134,20 @@ def get_db() -> Iterator[Session]:
         yield session
     finally:
         session.close()
+
+
+def _backfill_camera_sites() -> None:
+    """Preserve pre-site cameras and assign them once, without changing streams."""
+    from sqlalchemy import select
+    from app.models import Camera, Site
+
+    with SessionLocal() as session:
+        rows = session.scalars(select(Camera).where(Camera.site_id.is_(None))).all()
+        if rows:
+            site = session.get(Site, "existing-cameras")
+            if site is None:
+                session.add(Site(id="existing-cameras", name="Existing cameras"))
+                session.flush()
+            for row in rows:
+                row.site_id = "existing-cameras"
+            session.commit()

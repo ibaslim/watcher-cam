@@ -23,7 +23,6 @@ export function CameraTile({ camera, events }: Props) {
     let connectTimer: ReturnType<typeof setTimeout> | null = null;
     let retryScheduled = false;
     let cancelled = false;
-    const connectDelayMs = stableDelay(camera.id, 12000);
 
     const scheduleRetry = () => {
       if (cancelled || retryScheduled) return;
@@ -31,7 +30,7 @@ export function CameraTile({ camera, events }: Props) {
       retryTimer = setTimeout(() => {
         retryScheduled = false;
         connect();
-      }, 5000 + connectDelayMs);
+      }, 3000);
     };
 
     const connect = async () => {
@@ -67,11 +66,10 @@ export function CameraTile({ camera, events }: Props) {
       }
     };
 
-    const initialTimer = setTimeout(connect, connectDelayMs);
+    connect();
 
     return () => {
       cancelled = true;
-      clearTimeout(initialTimer);
       if (retryTimer) clearTimeout(retryTimer);
       if (connectTimer) clearTimeout(connectTimer);
       handle?.stop();
@@ -94,6 +92,10 @@ export function CameraTile({ camera, events }: Props) {
     <div
       className="group relative bg-verkada-card border border-verkada-border hover:border-slate-500 rounded-lg overflow-hidden flex flex-col transition-all shadow-sm aspect-video cursor-pointer"
       onClick={() => navigate(`/cameras/${camera.id}`)}
+      role="link"
+      tabIndex={0}
+      aria-label={`Open camera ${camera.name}`}
+      onKeyDown={event => { if (event.key === "Enter") navigate(`/cameras/${camera.id}`); }}
       title="Open camera detail page"
     >
         <video ref={videoRef} autoPlay playsInline muted className="w-full h-full object-cover bg-black" />
@@ -131,12 +133,4 @@ export function CameraTile({ camera, events }: Props) {
       </div>
     </div>
   );
-}
-
-function stableDelay(value: string, maxMs: number): number {
-  let hash = 0;
-  for (let i = 0; i < value.length; i += 1) {
-    hash = (hash * 31 + value.charCodeAt(i)) >>> 0;
-  }
-  return hash % maxMs;
 }

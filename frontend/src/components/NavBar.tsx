@@ -1,5 +1,5 @@
-import { NavLink } from "react-router-dom";
-import { CurrentUser, logout } from "../lib/api";
+import { Sidebar } from "./Sidebar";
+import { Camera, Site, CurrentUser, logout } from "../lib/api";
 import { TIMEOUT_MINUTES } from "./SessionTimeout";
 import { useEffect, useState } from "react";
 import { formatPortalClock, PORTAL_TIME_ZONE_LABEL } from "../lib/time";
@@ -7,8 +7,10 @@ import { getStoredTheme, setTheme, Theme } from "../lib/theme";
 
 export function NavBar({
   online,
-  user,
+  user, sites, cameras,
 }: {
+  sites: Site[];
+  cameras: Camera[];
   online: boolean;
   user: CurrentUser | null;
 }) {
@@ -25,43 +27,10 @@ export function NavBar({
   };
 
   return (
-    <header className="app-header bg-verkada-surface border-b border-verkada-border px-4 flex items-center justify-between sticky top-0 z-50">
-      <div className="app-header-main flex items-center gap-5 flex-1 min-w-0">
-        <h1 className="brand-lockup flex items-center gap-3 m-0 text-theme">
-          <span className="brand-mark apple-brand-mark" aria-hidden />
-          <span className="flex flex-col gap-0.5">
-            <span className="text-sm font-semibold">Sentinel Vision</span>
-            <span className="text-xs font-medium text-theme-muted uppercase tracking-wider">AI Camera Portal</span>
-          </span>
-        </h1>
-
-        <nav className="primary-nav flex items-center gap-1 border border-verkada-border rounded-lg bg-verkada-card p-1 overflow-x-auto scrollbar-hide" aria-label="Primary navigation">
-          <div className="nav-group">
-            <span className="nav-group-label">Monitor</span>
-            <NavItem to="/" end label="Dashboard" />
-            <NavItem to="/events" label="Events" />
-          </div>
-
-          {isAdmin && (
-            <>
-              <span className="nav-divider" aria-hidden />
-              <div className="nav-group">
-                <span className="nav-group-label">Manage</span>
-                <NavItem to="/cameras" label="Cameras" />
-                <NavItem to="/users" label="Users" />
-              </div>
-            </>
-          )}
-
-          <span className="nav-divider" aria-hidden />
-          <div className="nav-group">
-            <span className="nav-group-label">Review</span>
-            <NavItem to="/recordings" label="Recordings" />
-            <NavItem to="/reports" label="Reports" />
-          </div>
-        </nav>
-      </div>
-
+    <>
+    <Sidebar sites={sites} cameras={cameras} isAdmin={isAdmin} />
+    <header className="app-header site-topbar bg-verkada-surface border-b border-verkada-border px-4 flex items-center justify-between sticky top-0 z-40">
+      <strong className="text-sm">Sentinel Vision</strong>
       <div className="nav-meta flex items-center gap-2 flex-shrink-0">
         <button
           type="button"
@@ -100,18 +69,7 @@ export function NavBar({
         </button>
       </div>
     </header>
-  );
-}
-
-function NavItem({ to, label, end = false }: { to: string; label: string; end?: boolean }) {
-  return (
-    <NavLink
-      to={to}
-      end={end}
-      className={({ isActive }) => `nav-item ${isActive ? "is-active" : ""}`}
-    >
-      {label}
-    </NavLink>
+    </>
   );
 }
 

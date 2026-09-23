@@ -6,6 +6,7 @@ from sqlalchemy import (
     Boolean,
     DateTime,
     Float,
+    ForeignKey,
     Index,
     Integer,
     String,
@@ -30,6 +31,14 @@ class User(Base):
     created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
 
 
+class Site(Base):
+    __tablename__ = "sites"
+
+    id: Mapped[str] = mapped_column(String(64), primary_key=True)
+    name: Mapped[str] = mapped_column(String(128))
+    starred: Mapped[bool] = mapped_column(Boolean, default=False)
+
+
 class Camera(Base):
     """A configured camera."""
 
@@ -37,6 +46,7 @@ class Camera(Base):
 
     id: Mapped[str] = mapped_column(String(64), primary_key=True)
     name: Mapped[str] = mapped_column(String(128))
+    site_id: Mapped[str | None] = mapped_column(ForeignKey("sites.id"), nullable=True, index=True)
     host: Mapped[str] = mapped_column(String(128), default="")
     rtsp_port: Mapped[int] = mapped_column(Integer, default=554)
     http_port: Mapped[int] = mapped_column(Integer, default=80)
@@ -68,7 +78,25 @@ class Event(Base):
     confidence: Mapped[float | None] = mapped_column(Float, nullable=True)
     snapshot_path: Mapped[str | None] = mapped_column(String(255), nullable=True)
     entity_id: Mapped[str | None] = mapped_column(String(64), nullable=True, index=True)
+    track_id: Mapped[str | None] = mapped_column(String(96), nullable=True, index=True)
     raw: Mapped[str | None] = mapped_column(Text, nullable=True)
+
+
+class DetectionTrack(Base):
+    """A detector-observed object presence window."""
+
+    __tablename__ = "detection_tracks"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    camera_id: Mapped[str] = mapped_column(String(64), index=True)
+    track_id: Mapped[str] = mapped_column(String(96), index=True)
+    category: Mapped[str] = mapped_column(String(32), index=True)
+    label: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    confidence: Mapped[float | None] = mapped_column(Float, nullable=True)
+    snapshot_path: Mapped[str | None] = mapped_column(String(255), nullable=True)
+    first_seen: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow, index=True)
+    last_seen: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow, index=True)
+    updated_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
 
 class CameraClassification(Base):
     """A cropped, per-camera gallery item for unique detections."""
@@ -91,3 +119,5 @@ class CameraClassification(Base):
 
 Index("ix_events_camera_created", Event.camera_id, Event.created_at.desc())
 Index("ix_events_type_created", Event.event_type, Event.created_at.desc())
+Index("ix_detection_tracks_camera_track", DetectionTrack.camera_id, DetectionTrack.track_id)
+Index("ix_detection_tracks_camera_seen", DetectionTrack.camera_id, DetectionTrack.first_seen, DetectionTrack.last_seen)

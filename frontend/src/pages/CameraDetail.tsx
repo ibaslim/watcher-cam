@@ -1,7 +1,8 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
-import { useParams } from "react-router-dom";
+import { useNavigate, useParams } from "react-router-dom";
 import {
   API_URL,
+  recordingLink,
   Camera,
   ClassificationRow,
   EventRow,
@@ -14,9 +15,11 @@ import { startWhep, WhepHandle } from "../lib/whep";
 import { connectEvents } from "../lib/ws";
 
 type Props = { cameras: Camera[] };
+const SNAPSHOT_EVENT_LIMIT = 50;
 
 export function CameraDetail({ cameras }: Props) {
   const { cameraId } = useParams();
+  const navigate = useNavigate();
   const videoRef = useRef<HTMLVideoElement>(null);
   const [status, setStatus] = useState<"connecting" | "live" | "error">("connecting");
   const [events, setEvents] = useState<EventRow[]>([]);
@@ -33,8 +36,9 @@ export function CameraDetail({ cameras }: Props) {
   const [classificationEndTime, setClassificationEndTime] = useState("");
   const [snapshotPage, setSnapshotPage] = useState(1);
   const [detectionPage, setDetectionPage] = useState(1);
-  const [selectedMedia, setSelectedMedia] = useState<{ src: string; title: string; meta: string } | null>(null);
+  const [selectedMedia, setSelectedMedia] = useState<{ src: string; title: string; meta: string; recordingUrl?: string } | null>(null);
   const mountedRef = useRef(true);
+  const evidenceRefreshTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
 
   const camera = cameras.find((item) => item.id === cameraId);
 
@@ -49,7 +53,6 @@ export function CameraDetail({ cameras }: Props) {
     let connectTimer: ReturnType<typeof setTimeout> | null = null;
     let retryScheduled = false;
     let cancelled = false;
-    const connectDelayMs = stableDelay(camera.id, 12000);
 
     const scheduleRetry = () => {
       if (cancelled || retryScheduled) return;
@@ -57,7 +60,7 @@ export function CameraDetail({ cameras }: Props) {
       retryTimer = setTimeout(() => {
         retryScheduled = false;
         connect();
-      }, 5000 + connectDelayMs);
+      }, 3000);
     };
 
     const connect = async () => {
@@ -93,11 +96,10 @@ export function CameraDetail({ cameras }: Props) {
       }
     };
 
-    const initialTimer = setTimeout(connect, connectDelayMs);
+    connect();
 
     return () => {
       cancelled = true;
-      clearTimeout(initialTimer);
       if (retryTimer) clearTimeout(retryTimer);
       if (connectTimer) clearTimeout(connectTimer);
       handle?.stop();
@@ -111,30 +113,34 @@ export function CameraDetail({ cameras }: Props) {
     const classificationDateTo = buildRangeBoundary(classificationEndDate, classificationEndTime, true);
 
     setLoadingEvents(true);
-    try {
-      const rows = await fetchEvents({
+    setLoadingClassifications(true);
+
+    const [eventsResult, classificationsResult] = await Promise.allSettled([
+      fetchEvents({
         camera_id: camera.id,
         entity_id: selectedEntityId || undefined,
-        limit: selectedEntityId ? 200 : 50,
-      });
-      if (mountedRef.current) setEvents(rows);
-    } catch {
-      if (mountedRef.current) setEvents([]);
-    } finally {
-      if (mountedRef.current) setLoadingEvents(false);
-    }
-
-    setLoadingClassifications(true);
-    try {
-      const rows = await fetchClassifications(camera.id, undefined, 48, {
+        limit: selectedEntityId ? 200 : SNAPSHOT_EVENT_LIMIT,
+      }),
+      fetchClassifications(camera.id, undefined, 48, {
         date_from: classificationDateFrom,
         date_to: classificationDateTo,
-      });
-      if (mountedRef.current) setClassifications(rows);
-    } catch {
-      if (mountedRef.current) setClassifications([]);
-    } finally {
-      if (mountedRef.current) setLoadingClassifications(false);
+      }),
+    ]);
+
+    if (mountedRef.current) {
+      if (eventsResult.status === "fulfilled") {
+        setEvents(eventsResult.value);
+      } else {
+        setEvents([]);
+      }
+      setLoadingEvents(false);
+
+      if (classificationsResult.status === "fulfilled") {
+        setClassifications(classificationsResult.value);
+      } else {
+        setClassifications([]);
+      }
+      setLoadingClassifications(false);
     }
   }, [camera?.id, classificationEndDate, classificationEndTime, classificationStartDate, classificationStartTime, selectedEntityId]);
 
@@ -142,6 +148,10 @@ export function CameraDetail({ cameras }: Props) {
     mountedRef.current = true;
     return () => {
       mountedRef.current = false;
+      if (evidenceRefreshTimerRef.current) {
+        clearTimeout(evidenceRefreshTimerRef.current);
+        evidenceRefreshTimerRef.current = null;
+      }
     };
   }, []);
 
@@ -177,8 +187,16 @@ export function CameraDetail({ cameras }: Props) {
         } satisfies EventRow;
 
         const withoutDuplicate = prev.filter((item) => item.id !== nextEvent.id);
-        return [nextEvent, ...withoutDuplicate].slice(0, 12);
+        return [nextEvent, ...withoutDuplicate].slice(0, SNAPSHOT_EVENT_LIMIT);
       });
+
+      if (evidenceRefreshTimerRef.current) {
+        clearTimeout(evidenceRefreshTimerRef.current);
+      }
+      evidenceRefreshTimerRef.current = setTimeout(() => {
+        evidenceRefreshTimerRef.current = null;
+        if (mountedRef.current) void refreshEvidence();
+      }, 750);
     });
 
     return () => {
@@ -191,7 +209,17 @@ export function CameraDetail({ cameras }: Props) {
     if (!raw) return "all";
     if (raw.includes("person")) return "person";
     if (raw.includes("animal") || raw.includes("cat") || raw.includes("dog")) return "animal";
-    if (raw.includes("vehicle") || raw.includes("car") || raw.includes("truck") || raw.includes("bus")) return "vehicle";
+    if (
+      raw.includes("vehicle")
+      || raw.includes("car")
+      || raw.includes("truck")
+      || raw.includes("bus")
+      || raw.includes("van")
+      || raw.includes("motorbike")
+      || raw.includes("motorcycle")
+      || raw.includes("bicycle")
+      || raw.includes("bike")
+    ) return "vehicle";
     return "all";
   };
 
@@ -532,33 +560,73 @@ export function CameraDetail({ cameras }: Props) {
                   {visibleEvents.map((event) => {
                     const title = event.label || event.event_type.replace(/_/g, " ");
                     const src = event.snapshot_url ? `${API_URL}${event.snapshot_url}` : null;
+                    const recUrl = recordingLink(event.camera_id, event.created_at, event.id);
                     return (
-                      <button
+                      <div
                         key={event.id}
-                        type="button"
-                        onClick={() => src && setSelectedMedia({ src, title, meta: `${event.event_type} • ${formatPortalDateTime(event.created_at)} ${PORTAL_TIME_ZONE_LABEL}` })}
                         className="overflow-hidden rounded-[24px] border border-verkada-border bg-verkada-surface text-left shadow-sm transition hover:-translate-y-0.5 hover:border-emerald-400/40"
                       >
-                        <div className="flex items-start justify-between gap-3 border-b border-verkada-border px-3 py-2.5">
-                          <div>
-                            <p className="text-sm font-semibold text-theme">{title}</p>
-                            <p className="text-[11px] text-theme-muted">{event.event_type}</p>
+                        <div
+                          role="button"
+                          tabIndex={0}
+                          onClick={() => {
+                            if (src) {
+                              setSelectedMedia({
+                                src,
+                                title,
+                                meta: `${formatPortalDateTime(event.created_at)} ${PORTAL_TIME_ZONE_LABEL} · ${event.camera_id}`,
+                                recordingUrl: recUrl,
+                              });
+                            } else {
+                              navigate(recUrl);
+                            }
+                          }}
+                          onKeyDown={(e) => {
+                            if (e.key === "Enter" || e.key === " ") {
+                              e.preventDefault();
+                              if (src) {
+                                setSelectedMedia({
+                                  src,
+                                  title,
+                                  meta: `${formatPortalDateTime(event.created_at)} ${PORTAL_TIME_ZONE_LABEL} · ${event.camera_id}`,
+                                  recordingUrl: recUrl,
+                                });
+                              } else {
+                                navigate(recUrl);
+                              }
+                            }
+                          }}
+                          title={src ? "Click to expand image" : "Play recording at this detection"}
+                          className="block w-full cursor-pointer text-left"
+                        >
+                          <div className="flex items-start justify-between gap-3 border-b border-verkada-border px-3 py-2.5">
+                            <div>
+                              <p className="text-sm font-semibold text-theme">{title}</p>
+                              <p className="text-[11px] text-theme-muted">{event.event_type}</p>
+                            </div>
+                            {event.confidence != null && (
+                              <span className="rounded-full border border-emerald-400/20 bg-emerald-500/10 px-2 py-1 text-[11px] font-semibold text-emerald-300">
+                                {(event.confidence * 100).toFixed(0)}%
+                              </span>
+                            )}
                           </div>
-                          {event.confidence != null && (
-                            <span className="rounded-full border border-emerald-400/20 bg-emerald-500/10 px-2 py-1 text-[11px] font-semibold text-emerald-300">
-                              {(event.confidence * 100).toFixed(0)}%
-                            </span>
+                          {src ? (
+                            <img src={src} alt={title} className="h-44 w-full object-cover" />
+                          ) : (
+                            <div className="flex h-44 items-center justify-center bg-verkada-hover text-sm text-theme-muted">No snapshot available</div>
                           )}
                         </div>
-                        {src ? (
-                          <img src={src} alt={title} className="h-44 w-full object-cover" />
-                        ) : (
-                          <div className="flex h-44 items-center justify-center bg-verkada-hover text-sm text-theme-muted">No snapshot available</div>
-                        )}
-                        <div className="px-3 py-2.5 text-[11px] text-theme-muted">
-                          {formatPortalDateTime(event.created_at)} {PORTAL_TIME_ZONE_LABEL}
+                        <div className="flex items-center justify-between gap-2 px-3 py-2.5 text-[11px] text-theme-muted">
+                          <span>{formatPortalDateTime(event.created_at)} {PORTAL_TIME_ZONE_LABEL}</span>
+                          <button
+                            type="button"
+                            onClick={() => navigate(recUrl)}
+                            className="font-medium text-blue-400 hover:text-blue-300"
+                          >
+                            Play recording ↗
+                          </button>
                         </div>
-                      </button>
+                      </div>
                     );
                   })}
                 </div>
@@ -580,10 +648,38 @@ export function CameraDetail({ cameras }: Props) {
                         key={item.classification_key || `classification-${item.id}`}
                         className="overflow-hidden rounded-[24px] border border-verkada-border bg-verkada-surface text-left shadow-sm transition hover:-translate-y-0.5 hover:border-emerald-400/40"
                       >
-                        <button
-                          type="button"
-                          onClick={() => hasImage && setSelectedMedia({ src: src!, title, meta: `${item.category} • entity ${item.entity_id} • ${item.occurrence_count} appearances • last seen ${formatPortalDateTime(item.last_seen)} ${PORTAL_TIME_ZONE_LABEL}` })}
-                          className="block w-full text-left"
+                        <div
+                          role="button"
+                          tabIndex={0}
+                          onClick={() => {
+                            if (hasImage) {
+                              setSelectedMedia({
+                                src: src!,
+                                title,
+                                meta: `Last seen ${formatPortalDateTime(item.last_seen)} ${PORTAL_TIME_ZONE_LABEL} • entity ${item.entity_id}`,
+                                recordingUrl: recordingLink(item.camera_id, item.last_seen),
+                              });
+                            } else {
+                              navigate(recordingLink(item.camera_id, item.last_seen));
+                            }
+                          }}
+                          onKeyDown={(e) => {
+                            if (e.key === "Enter" || e.key === " ") {
+                              e.preventDefault();
+                              if (hasImage) {
+                                setSelectedMedia({
+                                  src: src!,
+                                  title,
+                                  meta: `Last seen ${formatPortalDateTime(item.last_seen)} ${PORTAL_TIME_ZONE_LABEL} • entity ${item.entity_id}`,
+                                  recordingUrl: recordingLink(item.camera_id, item.last_seen),
+                                });
+                              } else {
+                                navigate(recordingLink(item.camera_id, item.last_seen));
+                              }
+                            }
+                          }}
+                          title={hasImage ? "Click to expand image" : "Play recording at this detection"}
+                          className="block w-full cursor-pointer text-left"
                         >
                           <div className="flex items-start justify-between gap-3 border-b border-verkada-border px-3 py-2.5">
                             <div>
@@ -601,21 +697,37 @@ export function CameraDetail({ cameras }: Props) {
                           ) : (
                             <div className="flex h-44 items-center justify-center bg-verkada-hover text-sm text-theme-muted">No image available</div>
                           )}
-                        </button>
-                        <div className="flex items-center justify-between gap-3 px-3 py-2.5 text-[11px] text-theme-muted">
+                        </div>
+                        <div className="flex flex-wrap items-center justify-between gap-3 px-3 py-2.5 text-[11px] text-theme-muted">
                           <span>Last seen {formatPortalDateTime(item.last_seen)} {PORTAL_TIME_ZONE_LABEL}</span>
-                          <button
-                            type="button"
-                            onClick={() => {
-                              setSelectedEntityId(item.entity_id);
-                              setSnapshotFilter(item.category as "person" | "animal" | "vehicle");
-                              setSnapshotPage(1);
-                              setActiveEvidenceTab("snapshots");
-                            }}
-                            className="rounded-full border border-emerald-400/30 bg-emerald-500/10 px-3 py-1 text-[11px] font-semibold text-emerald-200"
-                          >
-                            View {item.occurrence_count} snapshots
-                          </button>
+                          <div className="flex items-center gap-2">
+                            {hasImage && (
+                              <button
+                                type="button"
+                                className="btn"
+                                onClick={() => setSelectedMedia({
+                                  src: src!,
+                                  title,
+                                  meta: `Last seen ${formatPortalDateTime(item.last_seen)} ${PORTAL_TIME_ZONE_LABEL} • entity ${item.entity_id}`,
+                                  recordingUrl: recordingLink(item.camera_id, item.last_seen),
+                                })}
+                              >
+                                Enlarge image
+                              </button>
+                            )}
+                            <button
+                              type="button"
+                              onClick={() => {
+                                setSelectedEntityId(item.entity_id);
+                                setSnapshotFilter(item.category as "person" | "animal" | "vehicle");
+                                setSnapshotPage(1);
+                                setActiveEvidenceTab("snapshots");
+                              }}
+                              className="rounded-full border border-emerald-400/30 bg-emerald-500/10 px-3 py-1 text-[11px] font-semibold text-emerald-200"
+                            >
+                              View {item.occurrence_count} snapshots
+                            </button>
+                          </div>
                         </div>
                       </div>
                   );
@@ -634,15 +746,52 @@ export function CameraDetail({ cameras }: Props) {
                 <p className="text-[10px] font-semibold uppercase tracking-[0.24em] text-blue-400">Full view</p>
                 <p className="text-sm font-semibold text-theme">{selectedMedia.title}</p>
               </div>
-              <button type="button" onClick={() => setSelectedMedia(null)} className="rounded-full border border-verkada-border bg-verkada-hover px-3 py-1.5 text-sm font-semibold text-theme">
-                Close
-              </button>
+              <div className="flex items-center gap-2">
+                {selectedMedia.recordingUrl && (
+                  <button
+                    type="button"
+                    onClick={() => {
+                      const url = selectedMedia.recordingUrl!;
+                      setSelectedMedia(null);
+                      navigate(url);
+                    }}
+                    className="btn primary text-xs"
+                  >
+                    Play video footage ↗
+                  </button>
+                )}
+                <button type="button" onClick={() => setSelectedMedia(null)} className="rounded-full border border-verkada-border bg-verkada-hover px-3 py-1.5 text-sm font-semibold text-theme">
+                  Close
+                </button>
+              </div>
             </div>
             <div className="p-4">
-              <img src={selectedMedia.src} alt={selectedMedia.title} className="max-h-[70vh] w-full object-contain" />
+              {selectedMedia.recordingUrl ? (
+                <div
+                  className="group relative cursor-pointer overflow-hidden rounded-xl"
+                  onClick={() => {
+                    const url = selectedMedia.recordingUrl!;
+                    setSelectedMedia(null);
+                    navigate(url);
+                  }}
+                  title="Click image to play video footage at this detection time"
+                >
+                  <img src={selectedMedia.src} alt={selectedMedia.title} className="max-h-[70vh] w-full object-contain transition-transform duration-200 group-hover:scale-[1.01]" />
+                  <div className="absolute inset-0 flex items-center justify-center bg-black/40 opacity-0 transition-opacity duration-200 group-hover:opacity-100">
+                    <span className="flex items-center gap-2 rounded-full bg-blue-600/90 px-4 py-2 text-xs font-semibold text-white shadow-lg backdrop-blur-sm">
+                      ▶ Play Video Footage
+                    </span>
+                  </div>
+                </div>
+              ) : (
+                <img src={selectedMedia.src} alt={selectedMedia.title} className="max-h-[70vh] w-full object-contain" />
+              )}
             </div>
-            <div className="border-t border-verkada-border px-4 py-3 text-sm text-theme-muted">
-              {selectedMedia.meta}
+            <div className="flex items-center justify-between border-t border-verkada-border px-4 py-3 text-sm text-theme-muted">
+              <span>{selectedMedia.meta}</span>
+              {selectedMedia.recordingUrl && (
+                <span className="text-xs text-blue-400">Click image to open video recording</span>
+              )}
             </div>
           </div>
         </div>
@@ -657,12 +806,4 @@ function buildRangeBoundary(dateValue: string, timeValue: string, isEnd: boolean
 
   const time = timeValue.trim() || (isEnd ? "23:59" : "00:00");
   return `${date}T${time}`;
-}
-
-function stableDelay(value: string, maxMs: number): number {
-  let hash = 0;
-  for (let i = 0; i < value.length; i += 1) {
-    hash = (hash * 31 + value.charCodeAt(i)) >>> 0;
-  }
-  return hash % maxMs;
 }
