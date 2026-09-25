@@ -86,11 +86,11 @@ export function CameraTile({ camera, events }: Props) {
 
   const latestDisplayLabel = latestEvent
     ? (latestEvent.label || latestEvent.event_type.replace(/_/g, " "))
-    : "Waiting for detections";
+    : "No recent detections";
 
   return (
     <div
-      className="group relative bg-verkada-card border border-verkada-border hover:border-slate-500 rounded-lg overflow-hidden flex flex-col transition-all shadow-sm aspect-video cursor-pointer"
+      className={`camera-tile ${status === "error" ? "is-offline" : ""}`}
       onClick={() => navigate(`/cameras/${camera.id}`)}
       role="link"
       tabIndex={0}
@@ -98,39 +98,20 @@ export function CameraTile({ camera, events }: Props) {
       onKeyDown={event => { if (event.key === "Enter") navigate(`/cameras/${camera.id}`); }}
       title="Open camera detail page"
     >
-        <video ref={videoRef} autoPlay playsInline muted className="w-full h-full object-cover bg-black" />
+        <video ref={videoRef} autoPlay playsInline muted className="camera-tile-video" />
 
-        <div className="absolute top-0 inset-x-0 z-10 flex items-center justify-between p-2.5 bg-gradient-to-b from-black/80 via-black/40 to-transparent">
-          <span className="text-xs font-medium text-white truncate">{camera.name}</span>
-
-          <span>
-            {status === "live" ? (
-              <span className="px-1.5 py-0.5 rounded text-[10px] font-mono font-semibold bg-emerald-500/10 text-emerald-400 border border-emerald-500/20">LIVE</span>
-            ) : status === "error" ? (
-              <span className="px-1.5 py-0.5 rounded text-[10px] font-mono font-semibold bg-red-500/10 text-red-400 border border-red-500/20">OFFLINE</span>
-            ) : (
-              <span className="px-1.5 py-0.5 rounded text-[10px] font-mono font-semibold bg-orange-500/10 text-orange-400 border border-orange-500/20">CONNECTING</span>
-            )}
-          </span>
+        <div className={`camera-status-badge ${status}`}>
+          <span />
+          {status === "live" ? "Live" : status === "error" ? "Offline" : "Connecting"}
         </div>
 
-        <div className="absolute left-2.5 top-11 z-10 rounded-full border border-white/20 bg-black/60 px-2.5 py-1 text-[10px] font-semibold uppercase tracking-[0.18em] text-slate-100 backdrop-blur-sm">
-          {latestDisplayLabel}
+        {status === "error" && <div className="camera-offline-state">Offline</div>}
+
+        <div className="camera-name-overlay">
+          <span>{camera.name}</span>
         </div>
 
-        <div className="absolute inset-x-0 bottom-0 z-10 border-t border-white/10 bg-black/60 backdrop-blur-sm">
-          {latestEvent ? (
-            <div className="px-2.5 py-2 text-[10px] text-slate-100">
-              <span className="font-semibold">Latest: {latestEvent.label || latestEvent.event_type.replace(/_/g, " ")}</span>
-            </div>
-          ) : (
-            <div className="px-2.5 py-2 text-[10px] text-slate-300">Waiting for detections…</div>
-          )}
-        </div>
-
-      <div className="absolute left-1/2 bottom-3 z-10 transform -translate-x-1/2 translate-y-2 opacity-0 pointer-events-none text-white bg-black/50 border border-white/20 rounded-full px-3 py-1.5 text-[10px] font-medium backdrop-blur-sm transition-all group-hover:opacity-100 group-hover:translate-y-0">
-        Open detail page
-      </div>
+        <div className="camera-detection-chip">{latestDisplayLabel}</div>
     </div>
   );
 }

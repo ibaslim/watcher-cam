@@ -30,7 +30,7 @@ export function NavBar({
     <>
     <Sidebar sites={sites} cameras={cameras} isAdmin={isAdmin} />
     <header className="app-header site-topbar bg-verkada-surface border-b border-verkada-border px-4 flex items-center justify-between sticky top-0 z-40">
-      <strong className="text-sm">Sentinel Vision</strong>
+      <strong className="topbar-brand">Watcher-Cam</strong>
       <div className="nav-meta flex items-center gap-2 flex-shrink-0">
         <button
           type="button"

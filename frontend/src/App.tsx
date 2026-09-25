@@ -192,7 +192,7 @@ function AppShell({
                 <Route path="/events" element={<Events events={events} cameras={cameras} />} />
                 <Route path="/recordings" element={<Recordings />} />
                 <Route path="/reports" element={<Reports />} />
-                <Route path="/cameras/:cameraId" element={<CameraDetail cameras={cameras} />} />
+                <Route path="/cameras/:cameraId" element={<CameraDetail cameras={cameras} sites={sites} isAdmin={isAdmin} />} />
             </Routes>
             </div>
         </div>

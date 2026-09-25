@@ -240,6 +240,7 @@ export async function deleteRecorder(id: string): Promise<void> {
 }
 export type EventFilters = {
   limit?: number;
+  offset?: number;
   date_from?: string;
   date_to?: string;
   camera_id?: string;
@@ -249,6 +250,7 @@ export type EventFilters = {
 export const fetchEvents = (filters: EventFilters = {}) => {
   const p = new URLSearchParams();
   if (filters.limit !== undefined) p.set("limit", String(filters.limit));
+  if (filters.offset !== undefined) p.set("offset", String(filters.offset));
   if (filters.date_from) p.set("date_from", filters.date_from);
   if (filters.date_to) p.set("date_to", filters.date_to);
   if (filters.camera_id) p.set("camera_id", filters.camera_id);
