@@ -3,13 +3,15 @@ import { Link, useNavigate, useParams } from "react-router-dom";
 import {
   API_URL,
   Camera,
+  ClassificationRow,
   EventRow,
   MEDIAMTX_URL,
   Site,
+  fetchClassifications,
   fetchEvents,
   recordingLink,
 } from "../lib/api";
-import { formatPortalDateTime, PORTAL_TIME_ZONE_LABEL } from "../lib/time";
+import { PORTAL_TIME_ZONE } from "../lib/time";
 import { startWhep, WhepHandle } from "../lib/whep";
 import { connectEvents } from "../lib/ws";
 
@@ -17,6 +19,11 @@ type Props = { cameras: Camera[]; sites: Site[]; isAdmin: boolean };
 type EvidenceFilter = "all" | "person" | "vehicle" | "animal";
 
 const EVENT_PAGE_SIZE = 24;
+
+function fullViewRecordingLink(cameraId: string, at: string, eventId?: number): string {
+  const url = recordingLink(cameraId, at, eventId);
+  return url.replace("/recordings?", "/recordings/player?");
+}
 
 export function CameraDetail({ cameras, sites, isAdmin }: Props) {
   const { cameraId } = useParams();
@@ -34,8 +41,7 @@ export function CameraDetail({ cameras, sites, isAdmin }: Props) {
   const [loadingEvents, setLoadingEvents] = useState(false);
   const [loadingMoreEvents, setLoadingMoreEvents] = useState(false);
   const [eventFilter, setEventFilter] = useState<EvidenceFilter>("all");
-  const [selectedMedia, setSelectedMedia] = useState<{ src: string; title: string; meta: string; recordingUrl?: string } | null>(null);
-
+  const [classificationPreviewByEntity, setClassificationPreviewByEntity] = useState<Record<string, ClassificationRow>>({});
   const camera = cameras.find((item) => item.id === cameraId);
   const site = sites.find((item) => item.id === camera?.site_id);
   const latestEvent = events[0];
@@ -188,6 +194,34 @@ export function CameraDetail({ cameras, sites, isAdmin }: Props) {
   }, [camera?.id, refreshEvidence]);
 
   useEffect(() => {
+    if (!camera) {
+      setClassificationPreviewByEntity({});
+      return;
+    }
+
+    let cancelled = false;
+    fetchClassifications(camera.id, undefined, 500)
+      .then((rows) => {
+        if (cancelled) return;
+        const next: Record<string, ClassificationRow> = {};
+        for (const row of rows) {
+          const previewUrl = row.crop_url || row.image_url;
+          if (row.entity_id && previewUrl && !next[row.entity_id]) {
+            next[row.entity_id] = row;
+          }
+        }
+        setClassificationPreviewByEntity(next);
+      })
+      .catch(() => {
+        if (!cancelled) setClassificationPreviewByEntity({});
+      });
+
+    return () => {
+      cancelled = true;
+    };
+  }, [camera?.id]);
+
+  useEffect(() => {
     if (!camera) return;
 
     const disconnect = connectEvents((payload) => {
@@ -283,7 +317,7 @@ export function CameraDetail({ cameras, sites, isAdmin }: Props) {
             <video ref={videoRef} autoPlay playsInline muted className="camera-live-video" />
             <div className={`camera-live-status ${status}`}>
               <span />
-              {status === "live" ? "Live" : status === "error" ? "Offline" : "Connecting"}
+              {status === "live" ? "Live" : status === "error" ? "Camera is currently down" : "Connecting"}
             </div>
             <div className="camera-live-meta">
               <span>{latestLabel}</span>
@@ -368,7 +402,7 @@ export function CameraDetail({ cameras, sites, isAdmin }: Props) {
                       <EventCard
                         key={event.id}
                         event={event}
-                        onOpenMedia={(media) => setSelectedMedia(media)}
+                        classificationPreview={event.entity_id ? classificationPreviewByEntity[event.entity_id] : undefined}
                         onPlay={(url) => navigate(url)}
                       />
                     ))}
@@ -384,89 +418,67 @@ export function CameraDetail({ cameras, sites, isAdmin }: Props) {
         </section>
       </div>
 
-      {selectedMedia ? (
-        <div className="camera-media-modal" onClick={() => setSelectedMedia(null)}>
-          <div className="camera-media-dialog" onClick={(event) => event.stopPropagation()}>
-            <div className="camera-media-head">
-              <div>
-                <p>Full view</p>
-                <h2>{selectedMedia.title}</h2>
-              </div>
-              <div>
-                {selectedMedia.recordingUrl && (
-                  <button
-                    type="button"
-                    onClick={() => {
-                      const url = selectedMedia.recordingUrl!;
-                      setSelectedMedia(null);
-                      navigate(url);
-                    }}
-                  >
-                    Play video footage
-                  </button>
-                )}
-                <button type="button" onClick={() => setSelectedMedia(null)}>Close</button>
-              </div>
-            </div>
-            <div className="camera-media-body">
-              <img src={selectedMedia.src} alt={selectedMedia.title} />
-            </div>
-            <div className="camera-media-foot">{selectedMedia.meta}</div>
-          </div>
-        </div>
-      ) : null}
     </main>
   );
 }
 
 function EventCard({
   event,
-  onOpenMedia,
+  classificationPreview,
   onPlay,
 }: {
   event: EventRow;
-  onOpenMedia: (media: { src: string; title: string; meta: string; recordingUrl?: string }) => void;
+  classificationPreview?: ClassificationRow;
   onPlay: (url: string) => void;
 }) {
   const title = event.label || event.event_type.replace(/_/g, " ");
   const src = event.snapshot_url ? `${API_URL}${event.snapshot_url}` : null;
-  const recUrl = recordingLink(event.camera_id, event.created_at, event.id);
+  const cropUrl = classificationPreview?.crop_url || classificationPreview?.image_url || null;
+  const cropSrc = cropUrl ? `${API_URL}${cropUrl}` : null;
+  const recUrl = fullViewRecordingLink(event.camera_id, event.created_at, event.id);
+  const eventDate = new Date(event.created_at);
+  const hasRecordingTarget = Boolean(event.camera_id && Number.isFinite(eventDate.getTime()));
+  const timeLabel = Number.isFinite(eventDate.getTime())
+    ? new Intl.DateTimeFormat("en-US", { timeZone: PORTAL_TIME_ZONE, hour: "numeric", minute: "2-digit", second: "2-digit", hour12: true }).format(eventDate)
+    : "Unknown time";
+  const detectionLabel = title.toLowerCase() === event.event_type.toLowerCase().replace(/_/g, " ") ? title : `${title} ${event.event_type.replace(/_/g, " ")}`;
+  const accessibleLabel = hasRecordingTarget
+    ? `Open recording from ${timeLabel}`
+    : `Recording unavailable for ${timeLabel}`;
 
   return (
-    <article className="camera-event-card">
+    <article className="camera-event-shell">
       <button
         type="button"
-        className="camera-event-media"
+        className="camera-event-card"
         onClick={() => {
-          if (src) {
-            onOpenMedia({
-              src,
-              title,
-              meta: `${formatPortalDateTime(event.created_at)} ${PORTAL_TIME_ZONE_LABEL} - ${event.camera_id}`,
-              recordingUrl: recUrl,
-            });
-          } else {
-            onPlay(recUrl);
-          }
+          if (hasRecordingTarget) onPlay(recUrl);
         }}
+        disabled={!hasRecordingTarget}
+        aria-label={accessibleLabel}
       >
-        {src ? (
-          <img src={src} alt={title} loading="lazy" />
-        ) : (
-          <span>No snapshot available</span>
-        )}
+        <span className="camera-event-media">
+          {src ? (
+            <img src={src} alt="" loading="lazy" />
+          ) : (
+            <span>No snapshot available</span>
+          )}
+          <span className="camera-event-overlay">
+            {hasRecordingTarget ? "Open recording" : "Recording unavailable"}
+          </span>
+        </span>
+        <span className="camera-event-foot">
+          <span>{timeLabel}</span>
+          <span>{detectionLabel}</span>
+          {event.confidence != null && <strong>{(event.confidence * 100).toFixed(0)}%</strong>}
+        </span>
+        {cropSrc ? (
+          <span className="camera-event-object-preview" aria-hidden="true">
+            <img src={cropSrc} alt="" loading="lazy" />
+            <span>{classificationPreview?.label || title}</span>
+          </span>
+        ) : null}
       </button>
-      <div className="camera-event-body">
-        <div>
-          <h3>{title}</h3>
-          <p>{event.event_type}</p>
-        </div>
-        {event.confidence != null && <strong>{(event.confidence * 100).toFixed(0)}%</strong>}
-      </div>
-      <div className="camera-event-foot">
-        <span>{formatPortalDateTime(event.created_at)} {PORTAL_TIME_ZONE_LABEL}</span>
-        <button type="button" onClick={() => onPlay(recUrl)}>Play recording</button>
-      </div>
     </article>
   );
 }

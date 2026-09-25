@@ -213,3 +213,4 @@ async def run_recording_loop() -> None:
             await rec.stop()
             if rec.task:
                 rec.task.cancel()
+

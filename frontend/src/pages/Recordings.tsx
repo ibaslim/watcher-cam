@@ -1,5 +1,5 @@
-import { useEffect, useMemo, useRef, useState, type MouseEvent } from "react";
-import { useSearchParams } from "react-router-dom";
+import { useEffect, useMemo, useRef, useState, type MouseEvent, type PointerEvent } from "react";
+import { useLocation, useNavigate, useSearchParams } from "react-router-dom";
 import {
   API_URL,
   Camera,
@@ -80,13 +80,17 @@ function findClip(day: RecordingDay | null, second: number): RecordingTimelineCl
 }
 
 export function Recordings() {
+  const location = useLocation();
+  const navigate = useNavigate();
   const [params, setParams] = useSearchParams();
   const videoRef = useRef<HTMLVideoElement>(null);
   const videoStageRef = useRef<HTMLDivElement>(null);
+  const dragStartRef = useRef<{ pointerId: number; x: number; y: number; panX: number; panY: number } | null>(null);
   const [cameras, setCameras] = useState<Camera[]>([]);
   const cameraId = params.get("camera") || cameras[0]?.id || "";
   const at = params.get("at") || "";
   const eventId = params.get("event");
+  const fullView = location.pathname === "/recordings/player" || Boolean(cameraId && at && eventId) || params.get("view") === "player";
   const validTime = !at || Number.isFinite(Date.parse(at));
   const dayParam = params.get("day") || (at && validTime ? portalDateInput(at) : portalTodayDateInput());
   const [day, setDay] = useState<RecordingDay | null>(null);
@@ -106,6 +110,9 @@ export function Recordings() {
   const [settingsOpen, setSettingsOpen] = useState(false);
   const [pointerEnabled, setPointerEnabled] = useState(false);
   const [pointerPosition, setPointerPosition] = useState<{ x: number; y: number } | null>(null);
+  const [pan, setPan] = useState({ x: 0, y: 0 });
+  const [speedOpen, setSpeedOpen] = useState(false);
+  const [isDraggingVideo, setIsDraggingVideo] = useState(false);
 
   useEffect(() => {
     let cancelled = false;
@@ -188,13 +195,16 @@ export function Recordings() {
     setPlaybackRate(1);
     setSettingsOpen(false);
     setPointerPosition(null);
+    setPan({ x: 0, y: 0 });
+    setSpeedOpen(false);
+    setIsDraggingVideo(false);
   }, [selected?.url]);
 
   const load = () => { setAutoRetry(0); setRevision(value => value + 1); };
 
   function browse(nextCamera: string, nextDay: string) {
     setAutoRetry(0);
-    setParams({ camera: nextCamera, day: nextDay });
+    setParams(fullView ? { camera: nextCamera, day: nextDay, view: "player" } : { camera: nextCamera, day: nextDay });
   }
 
   function seekTo(second: number, play = false) {
@@ -258,17 +268,22 @@ export function Recordings() {
 
   function changePlaybackRate(nextRate: number) {
     setPlaybackRate(nextRate);
+    setSpeedOpen(false);
     if (videoRef.current) videoRef.current.playbackRate = nextRate;
   }
 
   function goToLive() {
-    if (!day?.clips.length) return;
-    const latestClip = day.clips[day.clips.length - 1];
-    seekTo(Math.max(0, latestClip.end_second - 2), true);
+    if (!cameraId) {
+      setError("Camera is currently down.");
+      return;
+    }
+    navigate(`/cameras/${encodeURIComponent(cameraId)}`);
   }
 
   function changeZoom(nextZoom: number) {
-    setZoom(Math.max(1, Math.min(4, Number(nextZoom.toFixed(2)))));
+    const value = Math.max(1, Math.min(4, Number(nextZoom.toFixed(2))));
+    setZoom(value);
+    if (value <= 1) setPan({ x: 0, y: 0 });
   }
 
   function zoomIn() {
@@ -290,10 +305,20 @@ export function Recordings() {
       const context = canvas.getContext("2d");
       if (!context) return;
       context.drawImage(video, 0, 0, canvas.width, canvas.height);
-      const link = document.createElement("a");
-      link.download = `${cameraName || "camera"}-${timeLabel(timelineSecond).replace(/:/g, "-")}.png`;
-      link.href = canvas.toDataURL("image/png");
-      link.click();
+      canvas.toBlob((blob) => {
+        if (!blob) {
+          setError("Snapshot capture is not available for this video source.");
+          return;
+        }
+        const url = URL.createObjectURL(blob);
+        const link = document.createElement("a");
+        link.download = `${cameraName || "camera"}-${timeLabel(timelineSecond).replace(/:/g, "-")}.png`;
+        link.href = url;
+        document.body.appendChild(link);
+        link.click();
+        link.remove();
+        URL.revokeObjectURL(url);
+      }, "image/png");
     } catch {
       setError("Snapshot capture is not available for this video source.");
     }
@@ -328,6 +353,39 @@ export function Recordings() {
     });
   }
 
+  function handleVideoPanStart(event: PointerEvent<HTMLDivElement>) {
+    if (zoom <= 1 || pointerEnabled) return;
+    event.currentTarget.setPointerCapture(event.pointerId);
+    dragStartRef.current = {
+      pointerId: event.pointerId,
+      x: event.clientX,
+      y: event.clientY,
+      panX: pan.x,
+      panY: pan.y,
+    };
+    setIsDraggingVideo(true);
+  }
+
+  function handleVideoPanMove(event: PointerEvent<HTMLDivElement>) {
+    const drag = dragStartRef.current;
+    if (!drag || drag.pointerId !== event.pointerId) return;
+    const limit = Math.min(45, (zoom - 1) * 18);
+    const nextX = Math.max(-limit, Math.min(limit, drag.panX + ((event.clientX - drag.x) / Math.max(1, event.currentTarget.clientWidth)) * 100));
+    const nextY = Math.max(-limit, Math.min(limit, drag.panY + ((event.clientY - drag.y) / Math.max(1, event.currentTarget.clientHeight)) * 100));
+    setPan({ x: nextX, y: nextY });
+  }
+
+  function handleVideoPanEnd(event: PointerEvent<HTMLDivElement>) {
+    const drag = dragStartRef.current;
+    if (drag?.pointerId === event.pointerId) {
+      dragStartRef.current = null;
+      setIsDraggingVideo(false);
+      if (event.currentTarget.hasPointerCapture(event.pointerId)) {
+        event.currentTarget.releasePointerCapture(event.pointerId);
+      }
+    }
+  }
+
   const activeClipOffset = selected ? Math.max(0, timelineSecond - selected.start_second) : 0;
   const cameraName = cameras.find(camera => camera.id === cameraId)?.name || cameraId;
   const currentPlaybackDate = playbackDate(day, timelineSecond);
@@ -338,15 +396,19 @@ export function Recordings() {
   }, [day, timelineSecond]);
 
   return (
-    <main className="page">
-      <div className="page-inner">
-        <h2 className="page-title">Recordings</h2>
-        <p className="page-sub">Play a full day of footage with detection markers.</p>
+    <main className={fullView ? "recording-full-page" : "page"}>
+      <div className={fullView ? "recording-full-inner" : "page-inner"}>
+        {!fullView && (
+          <>
+            <h2 className="page-title">Recordings</h2>
+            <p className="page-sub">Play a full day of footage with detection markers.</p>
+          </>
+        )}
 
-        {at && validTime && <div className="recording-jump-notice" role="status"><div><strong>Detection playback</strong><p>{formatPortalDateTime(at)} {PORTAL_TIME_ZONE_LABEL} · {cameraName}{loading && autoRetry > 0 ? ` · waiting for footage ${autoRetry}/${RECORDING_JUMP_MAX_RETRIES}` : ""}</p></div><button className="btn" onClick={() => browse(cameraId, day?.day || dayParam)}>Browse this day</button></div>}
+        {!fullView && at && validTime && <div className="recording-jump-notice" role="status"><div><strong>Detection playback</strong><p>{formatPortalDateTime(at)} {PORTAL_TIME_ZONE_LABEL} · {cameraName}{loading && autoRetry > 0 ? ` · waiting for footage ${autoRetry}/${RECORDING_JUMP_MAX_RETRIES}` : ""}</p></div><button className="btn" onClick={() => browse(cameraId, day?.day || dayParam)}>Browse this day</button></div>}
         {(error || cameraError) && <div role="alert" className="alert alert-warn mb-4"><span>{error || cameraError}</span><button className="btn" onClick={load} disabled={loading}>Retry</button></div>}
 
-        <div className="recording-card">
+        {!fullView && <div className="recording-card">
           <div className="recording-filters">
             <label>
               Camera
@@ -364,16 +426,20 @@ export function Recordings() {
               {loading ? "Loading..." : "Search"}
             </button>
           </div>
-        </div>
+        </div>}
 
-        <div className="recording-layout">
-          <div className="recording-player surveillance-player">
+        <div className={`recording-layout ${fullView ? "full-view" : ""}`}>
+          <div className={`recording-player surveillance-player ${fullView ? "full-view" : ""}`}>
             {selected ? (
               <>
                 <div
                   ref={videoStageRef}
-                  className={`recording-video-stage ${pointerEnabled ? "pointer-enabled" : ""}`}
+                  className={`recording-video-stage ${pointerEnabled ? "pointer-enabled" : ""} ${zoom > 1 && !pointerEnabled ? "is-zoomed" : ""} ${isDraggingVideo ? "is-dragging" : ""}`}
                   onClick={handleVideoPointer}
+                  onPointerDown={handleVideoPanStart}
+                  onPointerMove={handleVideoPanMove}
+                  onPointerUp={handleVideoPanEnd}
+                  onPointerCancel={handleVideoPanEnd}
                 >
                   <video
                     ref={videoRef}
@@ -383,7 +449,7 @@ export function Recordings() {
                     autoPlay
                     playsInline
                     className="recording-video"
-                    style={{ transform: `scale(${zoom})` }}
+                    style={{ transform: `translate(${pan.x}%, ${pan.y}%) scale(${zoom})` }}
                     onLoadedMetadata={(event) => {
                       const nextDuration = Number.isFinite(event.currentTarget.duration) ? event.currentTarget.duration : selected.duration_seconds;
                       setVideoDuration(nextDuration || 0);
@@ -452,11 +518,20 @@ export function Recordings() {
                     <button type="button" className="recording-icon-button" onClick={stepForward} aria-label="Next frame">
                       <Icon name="stepForward" />
                     </button>
-                    <label className="recording-speed-select" aria-label="Playback speed">
-                      <select value={playbackRate} onChange={(event) => changePlaybackRate(Number(event.target.value))}>
-                        {[0.25, 0.5, 1, 1.5, 2].map((rate) => <option key={rate} value={rate}>{rate}x</option>)}
-                      </select>
-                    </label>
+                    <div className="recording-speed-menu">
+                      <button type="button" className={`recording-speed-trigger ${speedOpen ? "active" : ""}`} onClick={() => setSpeedOpen((value) => !value)} aria-haspopup="listbox" aria-expanded={speedOpen} aria-label="Playback speed">
+                        {playbackRate}x
+                      </button>
+                      {speedOpen ? (
+                        <div className="recording-speed-options" role="listbox" aria-label="Playback speed">
+                          {[0.25, 0.5, 1, 1.5, 2].map((rate) => (
+                            <button key={rate} type="button" className={playbackRate === rate ? "active" : ""} role="option" aria-selected={playbackRate === rate} onClick={() => changePlaybackRate(rate)}>
+                              {rate}x
+                            </button>
+                          ))}
+                        </div>
+                      ) : null}
+                    </div>
                     <button type="button" className="recording-live-button" onClick={goToLive}>
                       <span className="recording-status-dot" />
                       Live
@@ -505,11 +580,11 @@ export function Recordings() {
                 ) : null}
               </>
             ) : (
-              <div className="empty">{loading ? "Finding recording..." : "No footage selected."}</div>
+              <PlayerPlaceholder loading={loading} hasError={Boolean(error || cameraError)} />
             )}
           </div>
 
-          <div className="recording-list">
+          {!fullView && <div className="recording-list">
             <h3>Detections</h3>
             {currentRanges.map((range) => (
               <DetectionRangeButton key={range.id} range={range} onClick={() => seekTo(Math.max(0, range.start_second - 2), true)} />
@@ -529,10 +604,43 @@ export function Recordings() {
             )) : (
               <div className="empty !border-0 !rounded-none">No segments found.</div>
             )}
-          </div>
+          </div>}
         </div>
       </div>
     </main>
+  );
+}
+
+function PlayerPlaceholder({ loading, hasError }: { loading: boolean; hasError: boolean }) {
+  if (loading) {
+    return (
+      <div className="recording-player-placeholder loading" role="status" aria-live="polite">
+        <div className="recording-loader-frame" aria-hidden="true">
+          <span />
+          <span />
+          <span />
+        </div>
+        <strong>Retrieving video</strong>
+        <p>Preparing the selected recording.</p>
+      </div>
+    );
+  }
+
+  if (hasError) {
+    return (
+      <div className="recording-player-placeholder missing" role="status" aria-live="polite">
+        <BrokenVideoIcon />
+        <strong>Video not found</strong>
+        <p>This recording is unavailable or has not finished saving.</p>
+      </div>
+    );
+  }
+
+  return (
+    <div className="recording-player-placeholder" role="status">
+      <strong>No footage selected</strong>
+      <p>Choose a recording segment or detection marker.</p>
+    </div>
   );
 }
 
@@ -544,9 +652,6 @@ function Timeline({ day, value, onSeek }: { day: RecordingDay | null; value: num
 
   return (
     <div className="recording-timeline">
-      <button type="button" className="recording-timeline-arrow" onClick={() => onSeek(Math.max(0, value - 600))} aria-label="Previous timeline window">
-        <Icon name="chevronLeft" />
-      </button>
       <div className="recording-track">
         <div className="recording-ticks" aria-hidden="true">
           {ticks.map((tick, index) => <span key={index} className={tick.major ? "major" : ""} style={{ left: tick.left }} />)}
@@ -565,11 +670,12 @@ function Timeline({ day, value, onSeek }: { day: RecordingDay | null; value: num
           <button
             key={range.id}
             className={`recording-range ${range.category}`}
+            data-tooltip={`${range.label || `${range.category} detected`} · ${timeLabel(range.start_second)}-${timeLabel(range.end_second)}`}
             style={{
               left: `${(range.start_second / DAY_SECONDS) * 100}%`,
               width: `${(Math.max(6, range.end_second - range.start_second) / DAY_SECONDS) * 100}%`,
             }}
-            title={`${range.category} ${timeLabel(range.start_second)}-${timeLabel(range.end_second)}`}
+            aria-label={`${range.label || `${range.category} detected`} from ${timeLabel(range.start_second)} to ${timeLabel(range.end_second)}`}
             onClick={() => onSeek(Math.max(0, range.start_second - 2))}
           />
         ))}
@@ -577,8 +683,9 @@ function Timeline({ day, value, onSeek }: { day: RecordingDay | null; value: num
           <button
             key={detection.event_id}
             className={`recording-marker ${detectionClass(detection.type)}`}
+            data-tooltip={`${detection.label || detection.type.replace(/_/g, " ")} · ${timeLabel(detection.timeline_second)}`}
             style={{ left: `${(detection.timeline_second / DAY_SECONDS) * 100}%` }}
-            title={`${detection.label || detection.type} ${timeLabel(detection.timeline_second)}`}
+            aria-label={`${detection.label || detection.type.replace(/_/g, " ")} at ${timeLabel(detection.timeline_second)}`}
             onClick={() => onSeek(Math.max(0, detection.timeline_second - 2))}
           />
         ))}
@@ -598,10 +705,18 @@ function Timeline({ day, value, onSeek }: { day: RecordingDay | null; value: num
           <span>{shortClockLabel(DAY_SECONDS - 1)}</span>
         </div>
       </div>
-      <button type="button" className="recording-timeline-arrow" onClick={() => onSeek(Math.min(DAY_SECONDS - 1, value + 600))} aria-label="Next timeline window">
-        <Icon name="chevronRight" />
-      </button>
     </div>
+  );
+}
+
+function BrokenVideoIcon() {
+  return (
+    <svg className="recording-broken-icon" viewBox="0 0 72 72" aria-hidden="true" focusable="false">
+      <path d="M14 18h30a8 8 0 0 1 8 8v20a8 8 0 0 1-8 8H14z" />
+      <path d="M52 30l8-5v22l-8-5" />
+      <path d="M25 20l-5 10 8 7-7 15" />
+      <path d="M34 20l-4 8 7 6-4 18" />
+    </svg>
   );
 }
 

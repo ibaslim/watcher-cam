@@ -164,6 +164,22 @@ function AppShell({
 }) {
     const location = useLocation();
     const isAdmin = user?.role === "administrator";
+    const params = new URLSearchParams(location.search);
+    const isEventPlayback = location.pathname === "/recordings" && Boolean(params.get("camera") && params.get("at") && params.get("event"));
+    const isFullViewPlayer = location.pathname === "/recordings/player" || isEventPlayback || (location.pathname === "/recordings" && params.get("view") === "player");
+
+    if (isFullViewPlayer) {
+        return (
+            <div className="recording-app-fullscreen">
+                <SessionTimeout />
+                <Routes>
+                    <Route path="/recordings" element={<Recordings />} />
+                    <Route path="/recordings/player" element={<Recordings />} />
+                    <Route path="*" element={<Recordings />} />
+                </Routes>
+            </div>
+        );
+    }
 
     return (
         <div className="min-h-screen bg-verkada-canvas text-theme font-sans flex flex-col">
