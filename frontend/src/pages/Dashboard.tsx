@@ -3,9 +3,9 @@ import { useMemo, useState } from "react";
 import { Camera, EventRow, Site } from "../lib/api";
 import { CameraTile } from "../components/CameraTile";
 
-type Props = { cameras: Camera[]; events: EventRow[]; sites: Site[]; isAdmin: boolean; hidden?: boolean };
+type Props = { cameras: Camera[]; events: EventRow[]; sites: Site[]; isAdmin: boolean };
 
-export function Dashboard({ cameras, events, sites, isAdmin, hidden = false }: Props) {
+export function Dashboard({ cameras, events, sites, isAdmin }: Props) {
   const [params] = useSearchParams();
   const [query, setQuery] = useState("");
   const selected = params.get("site");
@@ -30,7 +30,7 @@ export function Dashboard({ cameras, events, sites, isAdmin, hidden = false }: P
   }, [groups, query, selected]);
   const visibleCameraCount = visible.reduce((count, site) => count + site.cameras.length, 0);
 
-  return <main className="page" style={hidden ? { display: "none" } : undefined}>
+  return <main className="page">
     <div className="dashboard-workspace">
       <div className="dashboard-search-row">
         <label className="dashboard-search">

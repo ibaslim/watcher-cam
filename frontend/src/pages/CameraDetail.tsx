@@ -11,6 +11,7 @@ import {
   fetchEvents,
   recordingLink,
 } from "../lib/api";
+import { getDetectionCategory } from "../lib/detectionCategories";
 import { PORTAL_TIME_ZONE } from "../lib/time";
 import { startWhep, WhepHandle } from "../lib/whep";
 import { connectEvents } from "../lib/ws";
@@ -112,21 +113,8 @@ export function CameraDetail({ cameras, sites, isAdmin }: Props) {
   }, [camera?.id]);
 
   const normalizeEvidenceCategory = useCallback((value: string | null | undefined): EvidenceFilter | "motion" => {
-    const raw = (value || "").trim().toLowerCase();
-    if (raw.includes("person")) return "person";
-    if (raw.includes("animal") || raw.includes("cat") || raw.includes("dog")) return "animal";
-    if (
-      raw.includes("vehicle")
-      || raw.includes("car")
-      || raw.includes("truck")
-      || raw.includes("bus")
-      || raw.includes("van")
-      || raw.includes("motorbike")
-      || raw.includes("motorcycle")
-      || raw.includes("bicycle")
-      || raw.includes("bike")
-    ) return "vehicle";
-    return "motion";
+    const category = getDetectionCategory(value);
+    return category === "other" ? "motion" : category;
   }, []);
 
   const mergeEvents = useCallback((current: EventRow[], nextRows: EventRow[]) => {
@@ -258,6 +246,8 @@ export function CameraDetail({ cameras, sites, isAdmin }: Props) {
   }, [camera?.id, mergeEvents, refreshEvidence]);
 
   useEffect(() => {
+    if (eventFilter !== "all") return;
+
     const node = loadMoreRef.current;
     if (!node) return;
 
@@ -269,7 +259,7 @@ export function CameraDetail({ cameras, sites, isAdmin }: Props) {
 
     observer.observe(node);
     return () => observer.disconnect();
-  }, [loadNextPage]);
+  }, [eventFilter, loadNextPage]);
 
   const filteredEvents = useMemo(() => {
     if (eventFilter === "all") return events;
@@ -412,6 +402,18 @@ export function CameraDetail({ cameras, sites, isAdmin }: Props) {
             </div>
           )}
 
+          {hasMoreEvents && eventFilter !== "all" && (
+            <div className="camera-filter-load-more">
+              <button
+                type="button"
+                className="camera-refresh-button"
+                onClick={loadNextPage}
+                disabled={loadingEvents || loadingMoreEvents}
+              >
+                {loadingMoreEvents ? "Loading more..." : "Load more events"}
+              </button>
+            </div>
+          )}
           <div ref={loadMoreRef} className="camera-load-sentinel" aria-hidden="true" />
           {loadingMoreEvents && <div className="camera-history-more">Loading more...</div>}
           {!hasMoreEvents && events.length > 0 && <div className="camera-history-more">No more events</div>}

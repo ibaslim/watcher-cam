@@ -11,6 +11,7 @@ import {
   fetchRecordingAt,
   fetchRecordingDay,
 } from "../lib/api";
+import { DetectionCategory, detectionCategoryLabel, getDetectionCategory } from "../lib/detectionCategories";
 import { portalTodayDateInput, portalDateInput, formatPortalDateTime, PORTAL_TIME_ZONE_LABEL, PORTAL_TIME_ZONE } from "../lib/time";
 
 function mb(bytes: number) { return `${(bytes / 1024 / 1024).toFixed(1)} MB`; }
@@ -19,6 +20,8 @@ const DAY_SECONDS = 24 * 60 * 60;
 const RECORDING_JUMP_RETRY_DELAY_MS = 10_000;
 const RECORDING_JUMP_MAX_RETRIES = 6;
 const RECENT_DETECTION_RETRY_WINDOW_MS = 10 * 60 * 1000;
+const DETECTION_MERGE_GAP_SECONDS = 3;
+const DETECTION_PLAYBACK_PADDING_SECONDS = 2;
 
 function isRecentDetection(value: string) {
   const time = Date.parse(value);
@@ -68,15 +71,126 @@ function formatPlaybackPill(value: Date | null, timeZone = PORTAL_TIME_ZONE) {
   return `${get("weekday")}   ${get("month")}/${get("day")}/${get("year")}   ${get("hour")}:${get("minute")}:${get("second")} ${get("dayPeriod")}`;
 }
 
-function detectionClass(type: string) {
-  if (type.includes("vehicle")) return "vehicle";
-  if (type.includes("animal")) return "animal";
-  return "person";
-}
-
 function findClip(day: RecordingDay | null, second: number): RecordingTimelineClip | null {
   if (!day) return null;
   return day.clips.find((clip) => second >= Math.max(0, clip.start_second) && second < Math.min(DAY_SECONDS, clip.end_second)) || null;
+}
+
+function clampTimelineSecond(second: number) {
+  return Math.max(0, Math.min(DAY_SECONDS - 1, second));
+}
+
+function clampZoom(value: number) {
+  return Math.max(1, Math.min(4, Number(value.toFixed(2))));
+}
+
+function containedVideoBox(stage: HTMLDivElement | null, video: HTMLVideoElement | null) {
+  if (!stage) return { width: 0, height: 0 };
+  const stageWidth = stage.clientWidth;
+  const stageHeight = stage.clientHeight;
+  if (!stageWidth || !stageHeight) return { width: 0, height: 0 };
+
+  if (!video?.videoWidth || !video.videoHeight) {
+    return { width: stageWidth, height: stageHeight };
+  }
+
+  const mediaRatio = video.videoWidth / video.videoHeight;
+  const stageRatio = stageWidth / stageHeight;
+  if (mediaRatio > stageRatio) {
+    return { width: stageWidth, height: stageWidth / mediaRatio };
+  }
+  return { width: stageHeight * mediaRatio, height: stageHeight };
+}
+
+function clampPanToZoom(
+  pan: { x: number; y: number },
+  zoom: number,
+  stage: HTMLDivElement | null,
+  video: HTMLVideoElement | null,
+) {
+  if (zoom <= 1 || !stage) return { x: 0, y: 0 };
+
+  const box = containedVideoBox(stage, video);
+  if (!box.width || !box.height) return { x: 0, y: 0 };
+
+  const maxX = Math.max(0, (box.width * (zoom - 1)) / 2);
+  const maxY = Math.max(0, (box.height * (zoom - 1)) / 2);
+  return {
+    x: Math.max(-maxX, Math.min(maxX, pan.x)),
+    y: Math.max(-maxY, Math.min(maxY, pan.y)),
+  };
+}
+
+function isPlayerControlTarget(target: EventTarget | null) {
+  return target instanceof Element && Boolean(target.closest("button, a, input, select, textarea, [role='button']"));
+}
+
+function detectionPlaybackWindow(day: RecordingDay, timelineSecond: number, eventId?: string | null) {
+  const numericEventId = eventId ? Number(eventId) : NaN;
+  const detection = Number.isFinite(numericEventId)
+    ? day.detections.find((item) => item.event_id === numericEventId)
+    : null;
+  const matchingRange = detection?.track_id
+    ? day.detection_ranges.find((range) =>
+      range.track_id === detection.track_id &&
+      timelineSecond >= range.start_second &&
+      timelineSecond <= Math.max(range.start_second + 1, range.end_second)
+    )
+    : null;
+
+  if (!matchingRange) return null;
+
+  return {
+    startSecond: clampTimelineSecond(matchingRange.start_second - DETECTION_PLAYBACK_PADDING_SECONDS),
+    endSecond: clampTimelineSecond(Math.max(matchingRange.start_second + 1, matchingRange.end_second) + DETECTION_PLAYBACK_PADDING_SECONDS),
+  };
+}
+
+type DetectionTimelineSegment = {
+  key: string;
+  category: DetectionCategory;
+  startSecond: number;
+  endSecond: number;
+  count: number;
+  labels: string[];
+};
+
+function detectionSourceLabel(detection: RecordingDetection) {
+  return detection.label || detection.type.replace(/_/g, " ");
+}
+
+function buildDetectionSegments(detections: RecordingDetection[]): DetectionTimelineSegment[] {
+  const ordered = detections
+    .map((detection) => ({
+      detection,
+      category: getDetectionCategory(detection.label || detection.type),
+      second: Math.max(0, Math.min(DAY_SECONDS - 1, detection.timeline_second)),
+      label: detectionSourceLabel(detection),
+    }))
+    .sort((a, b) => a.category.localeCompare(b.category) || a.second - b.second || a.detection.event_id - b.detection.event_id);
+
+  const segments: DetectionTimelineSegment[] = [];
+  let active: DetectionTimelineSegment | null = null;
+
+  for (const item of ordered) {
+    if (!active || active.category !== item.category || item.second - active.endSecond > DETECTION_MERGE_GAP_SECONDS) {
+      active = {
+        key: `${item.category}-${item.detection.event_id}`,
+        category: item.category,
+        startSecond: item.second,
+        endSecond: item.second,
+        count: 0,
+        labels: [],
+      };
+      segments.push(active);
+    }
+
+    active.endSecond = Math.max(active.endSecond, item.second);
+    active.count += 1;
+    if (!active.labels.includes(item.label)) active.labels.push(item.label);
+  }
+
+  return segments.sort((a, b) => a.startSecond - b.startSecond || a.category.localeCompare(b.category));
 }
 
 export function Recordings() {
@@ -97,6 +211,7 @@ export function Recordings() {
   const [selected, setSelected] = useState<RecordingTimelineClip | null>(null);
   const [timelineSecond, setTimelineSecond] = useState(0);
   const [pendingSecond, setPendingSecond] = useState<number | null>(null);
+  const [playbackLimitSecond, setPlaybackLimitSecond] = useState<number | null>(null);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState("");
   const [cameraError, setCameraError] = useState("");
@@ -111,6 +226,7 @@ export function Recordings() {
   const [pointerEnabled, setPointerEnabled] = useState(false);
   const [pointerPosition, setPointerPosition] = useState<{ x: number; y: number } | null>(null);
   const [pan, setPan] = useState({ x: 0, y: 0 });
+  const [videoBox, setVideoBox] = useState({ width: 0, height: 0 });
   const [speedOpen, setSpeedOpen] = useState(false);
   const [isDraggingVideo, setIsDraggingVideo] = useState(false);
 
@@ -124,7 +240,7 @@ export function Recordings() {
   useEffect(() => {
     let cancelled = false;
     const canAutoRetry = Boolean(at) && isRecentDetection(at);
-    setDay(null); setSelected(null); setTimelineSecond(0); setPendingSecond(null); setError("");
+    setDay(null); setSelected(null); setTimelineSecond(0); setPendingSecond(null); setPlaybackLimitSecond(null); setError("");
     if (!validTime) { setError("This recording link contains an invalid timestamp."); setLoading(false); return; }
     if (!cameraId || !dayParam) { setLoading(false); return; }
     setLoading(true);
@@ -143,10 +259,14 @@ export function Recordings() {
           try {
             const manifest = await fetchRecordingDay(cameraId, match.clip.day);
             if (cancelled) return;
-            const nextClip = findClip(manifest, match.timeline_second) || match.clip;
+            const playbackWindow = detectionPlaybackWindow(manifest, match.timeline_second, eventId);
+            const targetSecond = playbackWindow?.startSecond ?? match.timeline_second;
+            const nextClip = findClip(manifest, targetSecond) || findClip(manifest, match.timeline_second) || match.clip;
             setDay(manifest);
             setSelected(nextClip);
-            setPendingSecond(match.timeline_second);
+            setTimelineSecond(targetSecond);
+            setPendingSecond(targetSecond);
+            setPlaybackLimitSecond(playbackWindow?.endSecond ?? null);
           } catch {
             if (!cancelled) setDay(null);
           }
@@ -161,6 +281,7 @@ export function Recordings() {
         setTimelineSecond(nextSecond);
         setSelected(nextClip);
         setPendingSecond(nextClip ? nextSecond : null);
+        setPlaybackLimitSecond(null);
         if (!nextClip && manifest.clips.length === 0) {
           setError("No recordings found for this date.");
         } else if (!nextClip) {
@@ -196,9 +317,25 @@ export function Recordings() {
     setSettingsOpen(false);
     setPointerPosition(null);
     setPan({ x: 0, y: 0 });
+    setVideoBox({ width: 0, height: 0 });
     setSpeedOpen(false);
     setIsDraggingVideo(false);
   }, [selected?.url]);
+
+  useEffect(() => {
+    setPan((current) => clampPanToZoom(current, zoom, videoStageRef.current, videoRef.current));
+  }, [zoom]);
+
+  useEffect(() => {
+    const stage = videoStageRef.current;
+    if (!stage || typeof ResizeObserver === "undefined") return;
+    const observer = new ResizeObserver(() => {
+      setVideoBox(containedVideoBox(stage, videoRef.current));
+      setPan((current) => clampPanToZoom(current, zoom, stage, videoRef.current));
+    });
+    observer.observe(stage);
+    return () => observer.disconnect();
+  }, [zoom, selected?.url]);
 
   const load = () => { setAutoRetry(0); setRevision(value => value + 1); };
 
@@ -207,11 +344,12 @@ export function Recordings() {
     setParams(fullView ? { camera: nextCamera, day: nextDay, view: "player" } : { camera: nextCamera, day: nextDay });
   }
 
-  function seekTo(second: number, play = false) {
+  function seekTo(second: number, play = false, limitSecond: number | null = null) {
     if (!day) return;
-    const clamped = Math.max(0, Math.min(DAY_SECONDS - 1, second));
+    const clamped = clampTimelineSecond(second);
     const clip = findClip(day, clamped);
     setTimelineSecond(clamped);
+    setPlaybackLimitSecond(limitSecond);
     setError("");
 
     if (!clip) {
@@ -247,7 +385,8 @@ export function Recordings() {
     const clamped = Math.max(0, Math.min(videoDuration || selected.duration_seconds || 0, nextTime));
     video.currentTime = clamped;
     setVideoTime(clamped);
-    setTimelineSecond(Math.max(0, Math.min(DAY_SECONDS - 1, selected.start_second + clamped)));
+    setTimelineSecond(clampTimelineSecond(selected.start_second + clamped));
+    setPlaybackLimitSecond(null);
   }
 
   function rewind10Seconds() {
@@ -281,17 +420,17 @@ export function Recordings() {
   }
 
   function changeZoom(nextZoom: number) {
-    const value = Math.max(1, Math.min(4, Number(nextZoom.toFixed(2))));
+    const value = clampZoom(nextZoom);
     setZoom(value);
-    if (value <= 1) setPan({ x: 0, y: 0 });
+    setPan((current) => clampPanToZoom(current, value, videoStageRef.current, videoRef.current));
   }
 
   function zoomIn() {
-    changeZoom(zoom + 0.25);
+    setZoom((current) => clampZoom(current + 0.25));
   }
 
   function zoomOut() {
-    changeZoom(zoom - 0.25);
+    setZoom((current) => clampZoom(current - 0.25));
   }
 
   function captureSnapshot() {
@@ -354,7 +493,8 @@ export function Recordings() {
   }
 
   function handleVideoPanStart(event: PointerEvent<HTMLDivElement>) {
-    if (zoom <= 1 || pointerEnabled) return;
+    if (zoom <= 1 || pointerEnabled || isPlayerControlTarget(event.target)) return;
+    event.preventDefault();
     event.currentTarget.setPointerCapture(event.pointerId);
     dragStartRef.current = {
       pointerId: event.pointerId,
@@ -369,10 +509,12 @@ export function Recordings() {
   function handleVideoPanMove(event: PointerEvent<HTMLDivElement>) {
     const drag = dragStartRef.current;
     if (!drag || drag.pointerId !== event.pointerId) return;
-    const limit = Math.min(45, (zoom - 1) * 18);
-    const nextX = Math.max(-limit, Math.min(limit, drag.panX + ((event.clientX - drag.x) / Math.max(1, event.currentTarget.clientWidth)) * 100));
-    const nextY = Math.max(-limit, Math.min(limit, drag.panY + ((event.clientY - drag.y) / Math.max(1, event.currentTarget.clientHeight)) * 100));
-    setPan({ x: nextX, y: nextY });
+    event.preventDefault();
+    const nextPan = {
+      x: drag.panX + event.clientX - drag.x,
+      y: drag.panY + event.clientY - drag.y,
+    };
+    setPan(clampPanToZoom(nextPan, zoom, event.currentTarget, videoRef.current));
   }
 
   function handleVideoPanEnd(event: PointerEvent<HTMLDivElement>) {
@@ -440,40 +582,62 @@ export function Recordings() {
                   onPointerMove={handleVideoPanMove}
                   onPointerUp={handleVideoPanEnd}
                   onPointerCancel={handleVideoPanEnd}
+                  onLostPointerCapture={handleVideoPanEnd}
                 >
-                  <video
-                    ref={videoRef}
-                    key={selected.url}
-                    src={`${API_URL}${selected.url}`}
-                    controls={false}
-                    autoPlay
-                    playsInline
-                    className="recording-video"
-                    style={{ transform: `translate(${pan.x}%, ${pan.y}%) scale(${zoom})` }}
-                    onLoadedMetadata={(event) => {
-                      const nextDuration = Number.isFinite(event.currentTarget.duration) ? event.currentTarget.duration : selected.duration_seconds;
-                      setVideoDuration(nextDuration || 0);
-                      event.currentTarget.playbackRate = playbackRate;
-                      if (pendingSecond == null) return;
-                      const nextTime = Math.max(0, pendingSecond - selected.start_second);
-                      event.currentTarget.currentTime = nextTime;
-                      setVideoTime(nextTime);
+                  <div
+                    className="recording-video-frame"
+                    style={{
+                      width: videoBox.width ? `${videoBox.width}px` : "100%",
+                      height: videoBox.height ? `${videoBox.height}px` : "100%",
+                      transform: `translate3d(${pan.x}px, ${pan.y}px, 0) scale(${zoom})`,
                     }}
-                    onPlay={() => setIsPlaying(true)}
-                    onPause={() => setIsPlaying(false)}
-                    onTimeUpdate={(event) => {
-                      setVideoTime(event.currentTarget.currentTime);
-                      setTimelineSecond(Math.max(0, Math.min(DAY_SECONDS - 1, selected.start_second + event.currentTarget.currentTime)));
-                    }}
-                    onEnded={() => {
-                      setIsPlaying(false);
-                      if (!day) return;
-                      const nextSecond = Math.min(DAY_SECONDS - 1, selected.end_second + 0.01);
-                      const nextClip = findClip(day, nextSecond);
-                      if (nextClip) seekTo(nextSecond, true);
-                    }}
-                    onError={() => setError("This recording cannot be played yet. It may still be saving or is no longer available. Please retry.")}
-                  />
+                  >
+                    <video
+                      ref={videoRef}
+                      key={selected.url}
+                      src={`${API_URL}${selected.url}`}
+                      controls={false}
+                      autoPlay
+                      playsInline
+                      className="recording-video"
+                      onLoadedMetadata={(event) => {
+                        const nextDuration = Number.isFinite(event.currentTarget.duration) ? event.currentTarget.duration : selected.duration_seconds;
+                        setVideoDuration(nextDuration || 0);
+                        setVideoBox(containedVideoBox(videoStageRef.current, event.currentTarget));
+                        setPan((current) => clampPanToZoom(current, zoom, videoStageRef.current, event.currentTarget));
+                        event.currentTarget.playbackRate = playbackRate;
+                        if (pendingSecond == null) return;
+                        const nextTime = Math.max(0, pendingSecond - selected.start_second);
+                        event.currentTarget.currentTime = nextTime;
+                        setVideoTime(nextTime);
+                      }}
+                      onPlay={() => setIsPlaying(true)}
+                      onPause={() => setIsPlaying(false)}
+                      onTimeUpdate={(event) => {
+                        const nextVideoTime = event.currentTarget.currentTime;
+                        const nextTimelineSecond = clampTimelineSecond(selected.start_second + nextVideoTime);
+                        if (playbackLimitSecond != null && nextTimelineSecond >= playbackLimitSecond) {
+                          const limitedVideoTime = Math.max(0, playbackLimitSecond - selected.start_second);
+                          event.currentTarget.pause();
+                          event.currentTarget.currentTime = limitedVideoTime;
+                          setVideoTime(limitedVideoTime);
+                          setTimelineSecond(playbackLimitSecond);
+                          setPlaybackLimitSecond(null);
+                          return;
+                        }
+                        setVideoTime(nextVideoTime);
+                        setTimelineSecond(nextTimelineSecond);
+                      }}
+                      onEnded={() => {
+                        setIsPlaying(false);
+                        if (!day) return;
+                        const nextSecond = Math.min(DAY_SECONDS - 1, selected.end_second + 0.01);
+                        const nextClip = findClip(day, nextSecond);
+                        if (nextClip) seekTo(nextSecond, true, playbackLimitSecond);
+                      }}
+                      onError={() => setError("This recording cannot be played yet. It may still be saving or is no longer available. Please retry.")}
+                    />
+                  </div>
                   <div className="recording-camera-label">
                     <span className="recording-status-dot" />
                     <span>{cameraName}</span>
@@ -481,7 +645,7 @@ export function Recordings() {
                   <button type="button" className="recording-close-button" onClick={() => window.history.back()} aria-label="Close player">
                     <Icon name="close" />
                   </button>
-                  <div className="recording-zoom-controls" aria-label="Zoom controls">
+                  <div className="recording-zoom-controls" aria-label="Zoom controls" onPointerDown={(event) => event.stopPropagation()}>
                     <button type="button" onClick={zoomIn} disabled={zoom >= 4} aria-label="Zoom in">
                       <Icon name="zoomIn" />
                     </button>
@@ -587,10 +751,25 @@ export function Recordings() {
           {!fullView && <div className="recording-list">
             <h3>Detections</h3>
             {currentRanges.map((range) => (
-              <DetectionRangeButton key={range.id} range={range} onClick={() => seekTo(Math.max(0, range.start_second - 2), true)} />
+              <DetectionRangeButton
+                key={range.id}
+                range={range}
+                onClick={() => seekTo(
+                  clampTimelineSecond(range.start_second - DETECTION_PLAYBACK_PADDING_SECONDS),
+                  true,
+                  clampTimelineSecond(Math.max(range.start_second + 1, range.end_second) + DETECTION_PLAYBACK_PADDING_SECONDS),
+                )}
+              />
             ))}
             {day?.detections.length ? day.detections.slice(0, 30).map((detection) => (
-              <DetectionButton key={detection.event_id} detection={detection} onClick={() => seekTo(Math.max(0, detection.timeline_second - 2), true)} />
+              <DetectionButton
+                key={detection.event_id}
+                detection={detection}
+                onClick={() => {
+                  const playbackWindow = day ? detectionPlaybackWindow(day, detection.timeline_second, String(detection.event_id)) : null;
+                  seekTo(playbackWindow?.startSecond ?? clampTimelineSecond(detection.timeline_second - DETECTION_PLAYBACK_PADDING_SECONDS), true, playbackWindow?.endSecond ?? null);
+                }}
+              />
             )) : (
               <div className="empty !border-0 !rounded-none">No detections found for this date.</div>
             )}
@@ -649,10 +828,25 @@ function Timeline({ day, value, onSeek }: { day: RecordingDay | null; value: num
     left: `${(index / 96) * 100}%`,
     major: index % 8 === 0,
   })), []);
+  const detectionSegments = useMemo(() => buildDetectionSegments(day?.detections ?? []), [day?.detections]);
+  const legendCategories = useMemo(() => {
+    const present = new Set(detectionSegments.map((segment) => segment.category));
+    return (["person", "vehicle", "animal", "other"] as const).filter((category) => present.has(category));
+  }, [detectionSegments]);
 
   return (
     <div className="recording-timeline">
       <div className="recording-track">
+        {legendCategories.length > 0 ? (
+          <div className="recording-detection-legend" aria-label="Detection categories">
+            {legendCategories.map((category) => (
+              <span key={category} className={`recording-detection-legend-item ${category}`}>
+                <span aria-hidden="true" />
+                {detectionCategoryLabel(category)}
+              </span>
+            ))}
+          </div>
+        ) : null}
         <div className="recording-ticks" aria-hidden="true">
           {ticks.map((tick, index) => <span key={index} className={tick.major ? "major" : ""} style={{ left: tick.left }} />)}
         </div>
@@ -666,29 +860,27 @@ function Timeline({ day, value, onSeek }: { day: RecordingDay | null; value: num
             }}
           />
         ))}
-        {day?.detection_ranges.map((range) => (
+        {detectionSegments.map((segment) => {
+          const actualEndSecond = Math.max(segment.startSecond, segment.endSecond);
+          const labels = segment.labels.slice(0, 3).join(", ");
+          const moreLabels = segment.labels.length > 3 ? ` +${segment.labels.length - 3} more` : "";
+          const tooltip = `${detectionCategoryLabel(segment.category)}\n${timeLabel(segment.startSecond)}-${timeLabel(actualEndSecond)}\n${segment.count} detection${segment.count === 1 ? "" : "s"}${labels ? `\n${labels}${moreLabels}` : ""}`;
+          const active = value >= segment.startSecond && value <= Math.max(segment.startSecond + 1, actualEndSecond);
+
+          return (
           <button
-            key={range.id}
-            className={`recording-range ${range.category}`}
-            data-tooltip={`${range.label || `${range.category} detected`} · ${timeLabel(range.start_second)}-${timeLabel(range.end_second)}`}
+            key={segment.key}
+            className={`recording-range ${segment.category} ${active ? "active" : ""}`}
+            data-tooltip={tooltip}
             style={{
-              left: `${(range.start_second / DAY_SECONDS) * 100}%`,
-              width: `${(Math.max(6, range.end_second - range.start_second) / DAY_SECONDS) * 100}%`,
+              left: `${(segment.startSecond / DAY_SECONDS) * 100}%`,
+              width: `${((actualEndSecond - segment.startSecond) / DAY_SECONDS) * 100}%`,
             }}
-            aria-label={`${range.label || `${range.category} detected`} from ${timeLabel(range.start_second)} to ${timeLabel(range.end_second)}`}
-            onClick={() => onSeek(Math.max(0, range.start_second - 2))}
+            aria-label={`${detectionCategoryLabel(segment.category)} from ${timeLabel(segment.startSecond)} to ${timeLabel(actualEndSecond)}, ${segment.count} detection${segment.count === 1 ? "" : "s"}`}
+            onClick={() => onSeek(segment.startSecond)}
           />
-        ))}
-        {day?.detections.map((detection) => (
-          <button
-            key={detection.event_id}
-            className={`recording-marker ${detectionClass(detection.type)}`}
-            data-tooltip={`${detection.label || detection.type.replace(/_/g, " ")} · ${timeLabel(detection.timeline_second)}`}
-            style={{ left: `${(detection.timeline_second / DAY_SECONDS) * 100}%` }}
-            aria-label={`${detection.label || detection.type.replace(/_/g, " ")} at ${timeLabel(detection.timeline_second)}`}
-            onClick={() => onSeek(Math.max(0, detection.timeline_second - 2))}
-          />
-        ))}
+          );
+        })}
         <span className="recording-playhead" style={{ left: `${(value / DAY_SECONDS) * 100}%` }} />
         <input
           type="range"
@@ -770,8 +962,9 @@ function Icon({ name }: { name: IconName }) {
 }
 
 function DetectionButton({ detection, onClick }: { detection: RecordingDetection; onClick: () => void }) {
+  const category = getDetectionCategory(detection.label || detection.type);
   return (
-    <button className={`recording-clip detection ${detectionClass(detection.type)}`} onClick={onClick}>
+    <button className={`recording-clip detection ${category}`} onClick={onClick}>
       <span>{detection.label || detection.type.replace(/_/g, " ")}</span>
       <small>{timeLabel(detection.timeline_second)}</small>
     </button>

@@ -188,10 +188,8 @@ function AppShell({
             {sitesError && <div role="alert" className="alert alert-error">Could not load sites and cameras. {sitesError} <button className="btn" onClick={onCamerasChanged}>Retry</button></div>}
             <SessionTimeout />
 
-            <Dashboard sites={sites} isAdmin={isAdmin} cameras={cameras} events={events} hidden={location.pathname !== "/"} />
-
             <Routes>
-                <Route path="/" element={null} />
+                <Route path="/" element={<Dashboard sites={sites} isAdmin={isAdmin} cameras={cameras} events={events} />} />
 
                 <Route
                     path="/cameras"
