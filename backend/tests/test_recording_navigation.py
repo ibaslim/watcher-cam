@@ -116,8 +116,8 @@ class RecordingNavigationTests(unittest.TestCase):
         with patch.object(recordings, "_clip_duration", return_value=600):
             result = self.lookup("2026-09-18T07:00:15+00:00", db=db, event_id=1)
 
-        self.assertEqual(result["offset_seconds"], 10)
-        self.assertEqual(result["timeline_second"], 12 * 3600 + 10)
+        self.assertEqual(result["offset_seconds"], 0)
+        self.assertEqual(result["timeline_second"], 12 * 3600)
 
     def test_unfinished_clip_and_probe_timeout_fail_gracefully(self):
         self.clip()

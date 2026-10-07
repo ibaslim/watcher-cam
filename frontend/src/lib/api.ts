@@ -469,9 +469,10 @@ export async function deleteSite(id: string): Promise<void> {
   if (!response.ok) throw new Error(await response.text());
 }
 
-export function recordingLink(cameraId: string, at: string, eventId?: number): string {
+export function recordingLink(cameraId: string, at: string, eventId?: number, returnTo?: string): string {
   const params = new URLSearchParams({ camera: cameraId, at });
   if (eventId != null) params.set("event", String(eventId));
+  if (returnTo) params.set("returnTo", returnTo);
   return `/recordings?${params.toString()}`;
 }
 export type RecordingMatch = {

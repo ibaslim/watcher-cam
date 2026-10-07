@@ -735,6 +735,56 @@
     color: var(--text-dim);
     min-width: 160px;
   }
+  .recordings-selection-page {
+    min-height: calc(100vh - 72px);
+  }
+  .recordings-selection-inner {
+    display: grid;
+    align-content: start;
+    justify-items: center;
+  }
+  .recordings-selection-inner .page-title,
+  .recordings-selection-inner .page-sub {
+    width: min(520px, 100%);
+  }
+  .recordings-selection-form {
+    width: min(520px, 100%);
+    display: grid;
+    gap: 16px;
+    margin-top: 18px;
+    padding: 22px;
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    background: var(--card);
+    box-shadow: 0 16px 40px rgba(15, 23, 42, 0.10);
+  }
+  .recordings-selection-form label {
+    display: grid;
+    gap: 7px;
+    color: var(--text-dim);
+    font-size: 0.76rem;
+    font-weight: 700;
+    text-transform: uppercase;
+    letter-spacing: 0.05em;
+  }
+  .recordings-selection-form .btn {
+    justify-self: start;
+  }
+  .recordings-selection-error {
+    margin: -2px 0 0;
+    color: #f97316;
+    font-size: 0.82rem;
+    font-weight: 650;
+  }
+  @media (max-width: 640px) {
+    .recordings-selection-form {
+      padding: 16px;
+    }
+    .recordings-selection-form .btn {
+      width: 100%;
+      justify-content: center;
+    }
+  }
   .recording-layout {
     display: grid;
     grid-template-columns: minmax(0, 1fr) 280px;

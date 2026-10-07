@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
-import { Link, useNavigate, useParams } from "react-router-dom";
+import { Link, useLocation, useNavigate, useParams } from "react-router-dom";
 import {
   API_URL,
   Camera,
@@ -21,13 +21,14 @@ type EvidenceFilter = "all" | "person" | "vehicle" | "animal";
 
 const EVENT_PAGE_SIZE = 24;
 
-function fullViewRecordingLink(cameraId: string, at: string, eventId?: number): string {
-  const url = recordingLink(cameraId, at, eventId);
+function fullViewRecordingLink(cameraId: string, at: string, eventId?: number, returnTo?: string): string {
+  const url = recordingLink(cameraId, at, eventId, returnTo);
   return url.replace("/recordings?", "/recordings/player?");
 }
 
 export function CameraDetail({ cameras, sites, isAdmin }: Props) {
   const { cameraId } = useParams();
+  const location = useLocation();
   const navigate = useNavigate();
   const videoRef = useRef<HTMLVideoElement>(null);
   const loadMoreRef = useRef<HTMLDivElement>(null);
@@ -297,7 +298,10 @@ export function CameraDetail({ cameras, sites, isAdmin }: Props) {
     );
   }
 
-  const recordingUrl = latestEvent ? recordingLink(camera.id, latestEvent.created_at, latestEvent.id) : `/recordings?camera=${encodeURIComponent(camera.id)}`;
+  const returnTo = `${location.pathname}${location.search}${location.hash}`;
+  const recordingUrl = latestEvent
+    ? recordingLink(camera.id, latestEvent.created_at, latestEvent.id, returnTo)
+    : `/recordings?${new URLSearchParams({ camera: camera.id, returnTo })}`;
 
   return (
     <main className="camera-detail-page">
@@ -393,6 +397,7 @@ export function CameraDetail({ cameras, sites, isAdmin }: Props) {
                         key={event.id}
                         event={event}
                         classificationPreview={event.entity_id ? classificationPreviewByEntity[event.entity_id] : undefined}
+                        returnTo={returnTo}
                         onPlay={(url) => navigate(url)}
                       />
                     ))}
@@ -427,17 +432,19 @@ export function CameraDetail({ cameras, sites, isAdmin }: Props) {
 function EventCard({
   event,
   classificationPreview,
+  returnTo,
   onPlay,
 }: {
   event: EventRow;
   classificationPreview?: ClassificationRow;
+  returnTo: string;
   onPlay: (url: string) => void;
 }) {
   const title = event.label || event.event_type.replace(/_/g, " ");
   const src = event.snapshot_url ? `${API_URL}${event.snapshot_url}` : null;
   const cropUrl = classificationPreview?.crop_url || classificationPreview?.image_url || null;
   const cropSrc = cropUrl ? `${API_URL}${cropUrl}` : null;
-  const recUrl = fullViewRecordingLink(event.camera_id, event.created_at, event.id);
+  const recUrl = fullViewRecordingLink(event.camera_id, event.created_at, event.id, returnTo);
   const eventDate = new Date(event.created_at);
   const hasRecordingTarget = Boolean(event.camera_id && Number.isFinite(eventDate.getTime()));
   const timeLabel = Number.isFinite(eventDate.getTime())

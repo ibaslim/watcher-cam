@@ -19,6 +19,7 @@ from app.services.cameras import valid_camera_ids
 from app.services.recording import _app_timezone
 
 router = APIRouter()
+EVENT_PLAYBACK_PREROLL_SECONDS = 10
 
 
 def _display_name(filename: str) -> str:
@@ -134,19 +135,20 @@ def _recording_jump_time(db: Session, camera_id: str, at: datetime, event_id: in
         return instant
 
     event = db.get(Event, event_id)
-    if event is None or event.camera_id != camera_id or not event.track_id:
+    if event is None or event.camera_id != camera_id:
         return instant
 
+    jump_instant = instant
     track = db.scalar(
         select(DetectionTrack).where(
             DetectionTrack.camera_id == camera_id,
             DetectionTrack.track_id == event.track_id,
         )
-    )
-    if track is None:
-        return instant
+    ) if event.track_id else None
+    if track is not None:
+        jump_instant = _event_time(track.first_seen)
 
-    return _event_time(track.first_seen)
+    return jump_instant - timedelta(seconds=EVENT_PLAYBACK_PREROLL_SECONDS)
 
 
 @router.get("/day")
