@@ -91,6 +91,7 @@ export async function renewSession(): Promise<string> {
 }
 
 export type Camera = {
+  site_id?: string | null;
   id: string;
   name: string;
   webrtc_url: string;
@@ -111,6 +112,7 @@ export type Camera = {
 };
 
 export type CameraInput = {
+  site_id: string;
   id: string;
   name: string;
   host: string;
@@ -134,6 +136,7 @@ export type EventRow = {
   label: string | null;
   confidence: number | null;
   snapshot_url: string | null;
+  track_id?: string | null;
 };
 
 export type ClassificationRow = {
@@ -237,19 +240,23 @@ export async function deleteRecorder(id: string): Promise<void> {
 }
 export type EventFilters = {
   limit?: number;
+  offset?: number;
   date_from?: string;
   date_to?: string;
   camera_id?: string;
   entity_id?: string;
+  event_type?: string;
 };
 
 export const fetchEvents = (filters: EventFilters = {}) => {
   const p = new URLSearchParams();
   if (filters.limit !== undefined) p.set("limit", String(filters.limit));
+  if (filters.offset !== undefined) p.set("offset", String(filters.offset));
   if (filters.date_from) p.set("date_from", filters.date_from);
   if (filters.date_to) p.set("date_to", filters.date_to);
   if (filters.camera_id) p.set("camera_id", filters.camera_id);
   if (filters.entity_id) p.set("entity_id", filters.entity_id);
+  if (filters.event_type) p.set("event_type", filters.event_type);
 
   return fetch(`${API_URL}/api/events?${p.toString()}`, authed()).then((r) => ok<EventRow[]>(r));
 };
@@ -395,7 +402,95 @@ export type RecordingClip = {
   url: string;
 };
 
+export type RecordingTimelineClip = RecordingClip & {
+  start_time: string;
+  end_time: string;
+  start_second: number;
+  end_second: number;
+  duration_seconds: number;
+};
+
+export type RecordingDetection = {
+  event_id: number;
+  track_id: string | null;
+  type: string;
+  label: string | null;
+  confidence: number | null;
+  time: string;
+  timeline_second: number;
+  snapshot_url: string | null;
+};
+
+export type RecordingDetectionRange = {
+  id: number;
+  track_id: string;
+  category: "person" | "vehicle" | "animal";
+  label: string | null;
+  confidence: number | null;
+  start_time: string;
+  end_time: string;
+  start_second: number;
+  end_second: number;
+  snapshot_url: string | null;
+};
+
+export type RecordingDay = {
+  camera_id: string;
+  day: string;
+  timezone: string;
+  start: string;
+  end: string;
+  duration_seconds: number;
+  clips: RecordingTimelineClip[];
+  gaps: { start_second: number; end_second: number }[];
+  detections: RecordingDetection[];
+  detection_ranges: RecordingDetectionRange[];
+};
+
 export const fetchRecordings = (cameraId: string, day: string) =>
   fetch(`${API_URL}/api/recordings?camera_id=${cameraId}&day=${day}`, authed()).then((r) =>
     ok<RecordingClip[]>(r),
   );
+
+export const fetchRecordingDay = (cameraId: string, day: string) =>
+  fetch(`${API_URL}/api/recordings/day?${new URLSearchParams({ camera_id: cameraId, day })}`, authed()).then((r) =>
+    ok<RecordingDay>(r),
+  );
+
+export type Site = { id: string; name: string; starred: boolean };
+export async function fetchSites(): Promise<Site[]> {
+  return ok<Site[]>(await fetch(`${API_URL}/api/sites`, authed()));
+}
+export async function saveSite(site: { name: string; starred: boolean }, id?: string): Promise<Site> {
+  return ok<Site>(await fetch(`${API_URL}/api/sites${id ? `/${encodeURIComponent(id)}` : ""}`, authed({
+    method: id ? "PUT" : "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(site),
+  })));
+}
+export async function deleteSite(id: string): Promise<void> {
+  const response = await fetch(`${API_URL}/api/sites/${encodeURIComponent(id)}`, authed({ method: "DELETE" }));
+  if (!response.ok) throw new Error(await response.text());
+}
+
+export function recordingLink(cameraId: string, at: string, eventId?: number, returnTo?: string): string {
+  const params = new URLSearchParams({ camera: cameraId, at });
+  if (eventId != null) params.set("event", String(eventId));
+  if (returnTo) params.set("returnTo", returnTo);
+  return `/recordings?${params.toString()}`;
+}
+export type RecordingMatch = {
+  clip: RecordingTimelineClip;
+  offset_seconds: number;
+  timeline_second: number;
+  recorded_at: string;
+  duration_seconds: number;
+};
+export async function fetchRecordingAt(cameraId: string, at: string, eventId?: string | null): Promise<RecordingMatch> {
+  const params = new URLSearchParams({ camera_id: cameraId, at });
+  if (eventId) params.set("event_id", eventId);
+  const response = await fetch(`${API_URL}/api/recordings/at?${params}`, authed());
+  if (response.status === 404) {
+    const body = await response.json();
+    throw new Error(body.detail || "No recording available at this time.");
+  }
+  return ok<RecordingMatch>(response);
+}

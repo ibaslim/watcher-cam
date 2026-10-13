@@ -13,6 +13,7 @@ import hashlib
 import logging
 import threading
 import time
+import uuid
 from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
@@ -23,7 +24,7 @@ import numpy as np
 
 from detector.config import CameraConfig, get_settings
 from detector.face import analyze
-from detector.object_detection import detect_objects
+from detector.object_detection import ObjectDetection, detect_objects
 
 log = logging.getLogger(__name__)
 
@@ -104,6 +105,19 @@ def _diag(bbox: tuple[int, int, int, int]) -> float:
     return max(1.0, ((x2 - x1) ** 2 + (y2 - y1) ** 2) ** 0.5)
 
 
+def _bbox_size(bbox: tuple[int, int, int, int]) -> tuple[float, float]:
+    x1, y1, x2, y2 = bbox
+    return max(1.0, float(x2 - x1)), max(1.0, float(y2 - y1))
+
+
+def _similar_bbox_size(a: tuple[int, int, int, int], b: tuple[int, int, int, int]) -> bool:
+    aw, ah = _bbox_size(a)
+    bw, bh = _bbox_size(b)
+    width_ratio = min(aw, bw) / max(aw, bw)
+    height_ratio = min(ah, bh) / max(ah, bh)
+    return width_ratio >= 0.65 and height_ratio >= 0.65
+
+
 def _distance(a: tuple[float, float], b: tuple[float, float]) -> float:
     return ((a[0] - b[0]) ** 2 + (a[1] - b[1]) ** 2) ** 0.5
 
@@ -125,6 +139,75 @@ def _iou(a: tuple[int, int, int, int], b: tuple[int, int, int, int]) -> float:
     area_b = max(0, bx2 - bx1) * max(0, by2 - by1)
     union = area_a + area_b - inter
     return inter / union if union > 0 else 0.0
+
+
+def _box_area(bbox: tuple[int, int, int, int]) -> float:
+    x1, y1, x2, y2 = bbox
+    return float(max(0, x2 - x1) * max(0, y2 - y1))
+
+
+def _intersection_ratio(inner: tuple[int, int, int, int], outer: tuple[int, int, int, int]) -> float:
+    ix1 = max(inner[0], outer[0])
+    iy1 = max(inner[1], outer[1])
+    ix2 = min(inner[2], outer[2])
+    iy2 = min(inner[3], outer[3])
+    inter = max(0, ix2 - ix1) * max(0, iy2 - iy1)
+    area = _box_area(inner)
+    return inter / area if area > 0 else 0.0
+
+
+def _is_motorcycle_label(label: str) -> bool:
+    return label.strip().lower() in {"motorcycle", "motorbike"}
+
+
+def _has_person_for_motorcycle(
+    motorcycle: ObjectDetection,
+    detections: list[ObjectDetection],
+) -> bool:
+    for detection in detections:
+        if detection.category != "person":
+            continue
+
+        if _center_inside(detection.bbox, motorcycle.bbox):
+            return True
+
+        if _iou(detection.bbox, motorcycle.bbox) >= 0.08:
+            return True
+
+        if _intersection_ratio(detection.bbox, motorcycle.bbox) >= 0.20:
+            return True
+
+    return False
+
+
+def _with_rider_interest_detections(detections: list[ObjectDetection]) -> list[ObjectDetection]:
+    """Treat a detected motorcycle as both vehicle and rider/person evidence.
+
+    COCO-style detectors sometimes classify a rider and motorcycle together as
+    only "motorcycle". For alerting and evidence filters, the scene still has a
+    person of interest, so add a synthetic person detection unless YOLO already
+    found an overlapping person.
+    """
+
+    augmented = list(detections)
+
+    for detection in detections:
+        if detection.category != "vehicle" or not _is_motorcycle_label(detection.label):
+            continue
+
+        if _has_person_for_motorcycle(detection, augmented):
+            continue
+
+        augmented.append(
+            ObjectDetection(
+                bbox=detection.bbox,
+                confidence=detection.confidence,
+                label="person",
+                category="person",
+            )
+        )
+
+    return augmented
 
 
 def _scale_bbox(
@@ -513,6 +596,119 @@ class _ObjectTracker:
         return best[1] if best else None
 
 
+@dataclass
+class _AlertMemory:
+    kind: str
+    bbox: tuple[int, int, int, int]
+    center: tuple[float, float]
+    seen_at: float
+
+
+class _VehicleAlertSuppressor:
+    """Longer-lived memory to avoid repeated alerts for parked vehicles."""
+
+    def __init__(
+        self,
+        *,
+        suppress_sec: float,
+        match_iou: float,
+        match_px: float,
+    ) -> None:
+        self.suppress_sec = suppress_sec
+        self.match_iou = match_iou
+        self.match_px = match_px
+        self._memory: list[_AlertMemory] = []
+
+    def should_suppress(self, *, kind: str, bbox: tuple[int, int, int, int], now: float) -> bool:
+        if kind != "vehicle" or self.suppress_sec <= 0:
+            return False
+
+        self._prune(now)
+        center = _center(bbox)
+        threshold = max(self.match_px, _diag(bbox) * 0.25)
+
+        for item in self._memory:
+            if item.kind != kind:
+                continue
+
+            same_box = _iou(item.bbox, bbox) >= self.match_iou
+            same_position = _distance(item.center, center) <= threshold and _similar_bbox_size(item.bbox, bbox)
+
+            if same_box or same_position:
+                item.bbox = bbox
+                item.center = center
+                item.seen_at = now
+                return True
+
+        return False
+
+    def remember(self, *, kind: str, bbox: tuple[int, int, int, int], now: float) -> None:
+        if kind != "vehicle" or self.suppress_sec <= 0:
+            return
+
+        self._prune(now)
+        self._memory.append(_AlertMemory(kind=kind, bbox=bbox, center=_center(bbox), seen_at=now))
+
+    def _prune(self, now: float) -> None:
+        self._memory = [
+            item
+            for item in self._memory
+            if now - item.seen_at <= self.suppress_sec
+        ]
+
+
+@dataclass
+class _AlertCandidate:
+    bbox: tuple[int, int, int, int]
+    category: str
+    event_type: str
+    label: str
+    confidence: float | None
+    track_id: str
+
+
+def _detection_event_type(category: str) -> str:
+    return {
+        "person": "person_detected",
+        "vehicle": "vehicle_detected",
+        "animal": "animal_detected",
+    }[category]
+
+
+def _save_group_snapshot(
+    *,
+    cam: CameraConfig,
+    frame,
+    detections,
+    ts: datetime,
+) -> str:
+    filename = f"{cam.id}_{ts.strftime('%Y%m%d_%H%M%S_%f')}_detections.jpg"
+    full_path = Path(get_settings().snapshot_dir) / filename
+    annotated = frame.copy()
+    color = (0, 200, 0)
+
+    for detection in detections:
+        if detection.category not in {"person", "vehicle", "animal"}:
+            continue
+
+        x1, y1, x2, y2 = detection.bbox
+        cv2.rectangle(annotated, (x1, y1), (x2, y2), color, 2)
+        caption = detection.label if detection.confidence is None else f"{detection.label} {detection.confidence:.2f}"
+        cv2.putText(
+            annotated,
+            caption,
+            (x1, max(y1 - 8, 15)),
+            cv2.FONT_HERSHEY_SIMPLEX,
+            0.6,
+            color,
+            2,
+        )
+
+    full_path.parent.mkdir(parents=True, exist_ok=True)
+    cv2.imwrite(str(full_path), annotated)
+    return filename
+
+
 async def run_camera_loop(cam: CameraConfig) -> None:
     log.info(
         "worker starting for %s detect=%s",
@@ -557,6 +753,13 @@ async def _run_once(cam: CameraConfig) -> None:
         move_realert_px=s.object_move_realert_px,
         move_realert_ratio=s.object_move_realert_ratio,
     )
+    vehicle_alert_suppressor = _VehicleAlertSuppressor(
+        suppress_sec=s.vehicle_repeat_alert_suppress_sec,
+        match_iou=s.vehicle_repeat_alert_match_iou,
+        match_px=s.vehicle_repeat_alert_match_px,
+    )
+    run_track_prefix = f"{int(time.time())}-{uuid.uuid4().hex[:8]}"
+    last_track_post: dict[str, float] = {}
 
     try:
         async with httpx.AsyncClient(base_url=s.backend_url, timeout=5) as client:
@@ -575,13 +778,17 @@ async def _run_once(cam: CameraConfig) -> None:
                 last_frame_mono = now
                 detection_frame_index += 1
 
-                objects = await asyncio.to_thread(detect_objects, frame)
+                objects = [
+                    obj
+                    for obj in await asyncio.to_thread(detect_objects, frame)
+                    if obj.category in {"person", "vehicle", "animal"}
+                ]
+                objects = _with_rider_interest_detections(objects)
+                alert_candidates: list[_AlertCandidate] = []
+                vehicle_candidates_to_remember: list[_AlertCandidate] = []
 
                 for obj in objects:
-                    if obj.category not in {"person", "vehicle", "animal"}:
-                        continue
-
-                    _track_id, should_alert, _reason = tracker.update(
+                    local_track_id, should_alert, _reason = tracker.update(
                         kind=obj.category,
                         label=obj.label,
                         bbox=obj.bbox,
@@ -590,23 +797,69 @@ async def _run_once(cam: CameraConfig) -> None:
                         confirmation_hits=s.unknown_confirmation_hits,
                         confirmation_window=s.unknown_confirmation_window,
                     )
+                    track_id = f"{run_track_prefix}-{local_track_id}"
+                    event_type = _detection_event_type(obj.category)
+
+                    if now - last_track_post.get(track_id, 0.0) >= 1.0:
+                        last_track_post[track_id] = now
+                        try:
+                            sighting_resp = await client.post(
+                                "/api/detections/tracks",
+                                headers=_internal_headers(),
+                                json={
+                                    "camera_id": cam.id,
+                                    "track_id": track_id,
+                                    "category": obj.category,
+                                    "label": obj.label,
+                                    "confidence": obj.confidence,
+                                },
+                            )
+                            if sighting_resp.status_code >= 400:
+                                log.warning("track ingest failed: %s %s", sighting_resp.status_code, sighting_resp.text[:200])
+                        except Exception as e:
+                            log.warning("track ingest post failed: %s", e)
 
                     if should_alert:
-                        event_type = {
-                            "person": "person_detected",
-                            "vehicle": "vehicle_detected",
-                            "animal": "animal_detected",
-                        }[obj.category]
+                        if vehicle_alert_suppressor.should_suppress(kind=obj.category, bbox=obj.bbox, now=now):
+                            continue
+
+                        alert_candidates.append(
+                            candidate := _AlertCandidate(
+                                bbox=obj.bbox,
+                                category=obj.category,
+                                event_type=event_type,
+                                label=obj.label,
+                                confidence=obj.confidence,
+                                track_id=track_id,
+                            )
+                        )
+                        vehicle_candidates_to_remember.append(candidate)
+
+                for candidate in vehicle_candidates_to_remember:
+                    vehicle_alert_suppressor.remember(kind=candidate.category, bbox=candidate.bbox, now=now)
+
+                if alert_candidates:
+                    snapshot_path = await asyncio.to_thread(
+                        _save_group_snapshot,
+                        cam=cam,
+                        frame=frame,
+                        detections=objects,
+                        ts=datetime.utcnow(),
+                    )
+
+                    for candidate in alert_candidates:
                         await _emit(
                             client,
                             cam,
                             frame,
-                            obj.bbox,
-                            event_type=event_type,
-                            label=obj.label,
+                            candidate.bbox,
+                            event_type=candidate.event_type,
+                            label=candidate.label,
                             face_bbox=None,
-                            confidence=obj.confidence,
+                            confidence=candidate.confidence,
                             source="yolo",
+                            track_id=candidate.track_id,
+                            snapshot_path=snapshot_path,
                         )
 
 
@@ -625,14 +878,30 @@ async def _emit(
     face_bbox: tuple[int, int, int, int] | None = None,
     confidence: float | None = None,
     source: str = "face",
+    track_id: str | None = None,
+    snapshot_path: str | None = None,
 ) -> None:
     s = get_settings()
     ts = datetime.utcnow()
-    filename = f"{cam.id}_{ts.strftime('%Y%m%d_%H%M%S_%f')}_{event_type}.jpg"
+    filename = snapshot_path or f"{cam.id}_{ts.strftime('%Y%m%d_%H%M%S_%f')}_{event_type}.jpg"
     full_path = Path(s.snapshot_dir) / filename
     crop_artifact: dict[str, object] = {}
 
     def _write() -> None:
+        if snapshot_path:
+            crop_category = _event_detection_category(event_type)
+            fingerprint = None
+            if crop_category == "person":
+                faces = analyze(frame)
+                _selected_bbox, fingerprint = _select_face_crop_bbox(frame, bbox, faces)
+            if crop_category is not None:
+                crop_artifact.update({
+                    "crop_path": None,
+                    "fingerprint": fingerprint,
+                    "category": crop_category,
+                })
+            return
+
         snapshot_frame = (
             _capture_high_quality_snapshot(cam)
             if s.high_quality_event_snapshots
@@ -668,7 +937,6 @@ async def _emit(
         else:
             color = (0, 0, 220)
 
-        crop_path = None
         fingerprint = None
         crop_category = _event_detection_category(event_type)
 
@@ -677,11 +945,11 @@ async def _emit(
                 faces = analyze(frame)
                 _selected_bbox, fingerprint = _select_face_crop_bbox(frame, bbox, faces)
 
-            crop_artifact = {
+            crop_artifact.update({
                 "crop_path": None,
                 "fingerprint": fingerprint,
                 "category": crop_category,
-            }
+            })
 
         x1, y1, x2, y2 = draw_bbox
         cv2.rectangle(annotated, (x1, y1), (x2, y2), color, 2)
@@ -719,6 +987,7 @@ async def _emit(
                 "label": label,
                 "confidence": confidence,
                 "snapshot_path": filename,
+                "track_id": track_id,
             },
         )
 

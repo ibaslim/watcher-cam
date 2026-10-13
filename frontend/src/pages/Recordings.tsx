@@ -1,164 +1,1029 @@
-import { useEffect, useMemo, useState } from "react";
-import { API_URL, Camera, RecordingClip, fetchCameras, fetchRecordings } from "../lib/api";
-import { portalTodayDateInput } from "../lib/time";
+import { useEffect, useMemo, useRef, useState, type MouseEvent, type PointerEvent } from "react";
+import { useLocation, useNavigate, useSearchParams } from "react-router-dom";
+import {
+  API_URL,
+  Camera,
+  RecordingDay,
+  RecordingDetection,
+  RecordingTimelineClip,
+  fetchCameras,
+  fetchRecordingAt,
+  fetchRecordingDay,
+} from "../lib/api";
+import { DetectionCategory, detectionCategoryLabel, getDetectionCategory } from "../lib/detectionCategories";
+import { portalTodayDateInput, portalDateInput, PORTAL_TIME_ZONE } from "../lib/time";
 
-function today() {
-  return portalTodayDateInput();
+const DAY_SECONDS = 24 * 60 * 60;
+const RECORDING_JUMP_RETRY_DELAY_MS = 10_000;
+const RECORDING_JUMP_MAX_RETRIES = 6;
+const RECENT_DETECTION_RETRY_WINDOW_MS = 10 * 60 * 1000;
+const DETECTION_MERGE_GAP_SECONDS = 3;
+const DETECTION_PLAYBACK_PREROLL_SECONDS = 10;
+const DETECTION_PLAYBACK_POSTROLL_SECONDS = 2;
+
+function isRecentDetection(value: string) {
+  const time = Date.parse(value);
+  if (!Number.isFinite(time)) return false;
+  const age = Date.now() - time;
+  return age >= -60_000 && age <= RECENT_DETECTION_RETRY_WINDOW_MS;
 }
 
-function mb(bytes: number) {
-  return `${(bytes / 1024 / 1024).toFixed(1)} MB`;
+function timeLabel(seconds: number) {
+  const safe = Math.max(0, Math.min(DAY_SECONDS - 1, Math.floor(seconds)));
+  const h = Math.floor(safe / 3600);
+  const m = Math.floor((safe % 3600) / 60);
+  const s = safe % 60;
+  return `${String(h).padStart(2, "0")}:${String(m).padStart(2, "0")}:${String(s).padStart(2, "0")}`;
+}
+
+function shortClockLabel(seconds: number) {
+  const safe = Math.max(0, Math.min(DAY_SECONDS - 1, Math.floor(seconds)));
+  const h = Math.floor(safe / 3600);
+  const m = Math.floor((safe % 3600) / 60);
+  const suffix = h >= 12 ? "PM" : "AM";
+  const hour = h % 12 || 12;
+  return `${hour}:${String(m).padStart(2, "0")} ${suffix}`;
+}
+
+function playbackDate(value: RecordingDay | null, timelineSecond: number) {
+  if (!value?.start) return null;
+  const start = new Date(value.start).getTime();
+  if (!Number.isFinite(start)) return null;
+  return new Date(start + Math.max(0, timelineSecond) * 1000);
+}
+
+function formatPlaybackPill(value: Date | null, timeZone = PORTAL_TIME_ZONE) {
+  if (!value) return "Select footage";
+  const parts = new Intl.DateTimeFormat("en-US", {
+    timeZone,
+    weekday: "short",
+    month: "2-digit",
+    day: "2-digit",
+    year: "numeric",
+    hour: "2-digit",
+    minute: "2-digit",
+    second: "2-digit",
+    hour12: true,
+  }).formatToParts(value);
+  const get = (type: string) => parts.find((part) => part.type === type)?.value || "";
+  return `${get("weekday")}   ${get("month")}/${get("day")}/${get("year")}   ${get("hour")}:${get("minute")}:${get("second")} ${get("dayPeriod")}`;
+}
+
+function findClip(day: RecordingDay | null, second: number): RecordingTimelineClip | null {
+  if (!day) return null;
+  return day.clips.find((clip) => second >= Math.max(0, clip.start_second) && second < Math.min(DAY_SECONDS, clip.end_second)) || null;
+}
+
+function nearestClip(day: RecordingDay | null, second: number, direction: -1 | 1 = 1): RecordingTimelineClip | null {
+  if (!day?.clips.length) return null;
+  const exact = findClip(day, second);
+  if (exact) return exact;
+
+  const ordered = [...day.clips].sort((a, b) => a.start_second - b.start_second);
+  if (direction >= 0) {
+    return ordered.find((clip) => clip.start_second > second) || ordered[ordered.length - 1] || null;
+  }
+
+  return [...ordered].reverse().find((clip) => clip.start_second < second) || ordered[0] || null;
+}
+
+function clampTimelineSecond(second: number) {
+  return Math.max(0, Math.min(DAY_SECONDS - 1, second));
+}
+
+function clampZoom(value: number) {
+  return Math.max(1, Math.min(4, Number(value.toFixed(2))));
+}
+
+function containedVideoBox(stage: HTMLDivElement | null, video: HTMLVideoElement | null) {
+  if (!stage) return { width: 0, height: 0 };
+  const stageWidth = stage.clientWidth;
+  const stageHeight = stage.clientHeight;
+  if (!stageWidth || !stageHeight) return { width: 0, height: 0 };
+
+  if (!video?.videoWidth || !video.videoHeight) {
+    return { width: stageWidth, height: stageHeight };
+  }
+
+  const mediaRatio = video.videoWidth / video.videoHeight;
+  const stageRatio = stageWidth / stageHeight;
+  if (mediaRatio > stageRatio) {
+    return { width: stageWidth, height: stageWidth / mediaRatio };
+  }
+  return { width: stageHeight * mediaRatio, height: stageHeight };
+}
+
+function clampPanToZoom(
+  pan: { x: number; y: number },
+  zoom: number,
+  stage: HTMLDivElement | null,
+  video: HTMLVideoElement | null,
+) {
+  if (zoom <= 1 || !stage) return { x: 0, y: 0 };
+
+  const box = containedVideoBox(stage, video);
+  if (!box.width || !box.height) return { x: 0, y: 0 };
+
+  const maxX = Math.max(0, (box.width * (zoom - 1)) / 2);
+  const maxY = Math.max(0, (box.height * (zoom - 1)) / 2);
+  return {
+    x: Math.max(-maxX, Math.min(maxX, pan.x)),
+    y: Math.max(-maxY, Math.min(maxY, pan.y)),
+  };
+}
+
+function isPlayerControlTarget(target: EventTarget | null) {
+  return target instanceof Element && Boolean(target.closest("button, a, input, select, textarea, [role='button']"));
+}
+
+function safeReturnPath(value: string | null) {
+  if (!value || !value.startsWith("/") || value.startsWith("//")) return "";
+  return value;
+}
+
+function detectionPlaybackWindow(day: RecordingDay, timelineSecond: number, eventId?: string | null) {
+  const numericEventId = eventId ? Number(eventId) : NaN;
+  const detection = Number.isFinite(numericEventId)
+    ? day.detections.find((item) => item.event_id === numericEventId)
+    : null;
+  const matchingRange = detection?.track_id
+    ? day.detection_ranges.find((range) =>
+      range.track_id === detection.track_id &&
+      timelineSecond >= range.start_second &&
+      timelineSecond <= Math.max(range.start_second + 1, range.end_second)
+    )
+    : null;
+
+  if (!matchingRange) return null;
+
+  return {
+    startSecond: clampTimelineSecond(matchingRange.start_second - DETECTION_PLAYBACK_PREROLL_SECONDS),
+    endSecond: clampTimelineSecond(Math.max(matchingRange.start_second + 1, matchingRange.end_second) + DETECTION_PLAYBACK_POSTROLL_SECONDS),
+  };
+}
+
+type DetectionTimelineSegment = {
+  key: string;
+  category: DetectionCategory;
+  startSecond: number;
+  endSecond: number;
+  count: number;
+  labels: string[];
+};
+
+function detectionSourceLabel(detection: RecordingDetection) {
+  return detection.label || detection.type.replace(/_/g, " ");
+}
+
+function buildDetectionSegments(detections: RecordingDetection[]): DetectionTimelineSegment[] {
+  const ordered = detections
+    .map((detection) => ({
+      detection,
+      category: getDetectionCategory(detection.label || detection.type),
+      second: Math.max(0, Math.min(DAY_SECONDS - 1, detection.timeline_second)),
+      label: detectionSourceLabel(detection),
+    }))
+    .sort((a, b) => a.category.localeCompare(b.category) || a.second - b.second || a.detection.event_id - b.detection.event_id);
+
+  const segments: DetectionTimelineSegment[] = [];
+  let active: DetectionTimelineSegment | null = null;
+
+  for (const item of ordered) {
+    if (!active || active.category !== item.category || item.second - active.endSecond > DETECTION_MERGE_GAP_SECONDS) {
+      active = {
+        key: `${item.category}-${item.detection.event_id}`,
+        category: item.category,
+        startSecond: item.second,
+        endSecond: item.second,
+        count: 0,
+        labels: [],
+      };
+      segments.push(active);
+    }
+
+    active.endSecond = Math.max(active.endSecond, item.second);
+    active.count += 1;
+    if (!active.labels.includes(item.label)) active.labels.push(item.label);
+  }
+
+  return segments.sort((a, b) => a.startSecond - b.startSecond || a.category.localeCompare(b.category));
 }
 
 export function Recordings() {
+  const location = useLocation();
+  const navigate = useNavigate();
+  const [params] = useSearchParams();
+  const videoRef = useRef<HTMLVideoElement>(null);
+  const videoStageRef = useRef<HTMLDivElement>(null);
+  const dragStartRef = useRef<{ pointerId: number; x: number; y: number; panX: number; panY: number } | null>(null);
   const [cameras, setCameras] = useState<Camera[]>([]);
-  const [cameraId, setCameraId] = useState("");
-  const [day, setDay] = useState(today());
-  const [clips, setClips] = useState<RecordingClip[]>([]);
-  const [selected, setSelected] = useState<RecordingClip | null>(null);
+  const routeCameraId = params.get("camera") || "";
+  const at = params.get("at") || "";
+  const eventId = params.get("event");
+  const returnTo = safeReturnPath(params.get("returnTo"));
+  const fullView = location.pathname === "/recordings/player" || Boolean(routeCameraId && at && eventId) || params.get("view") === "player";
+  const routeDay = params.get("day") || params.get("date") || "";
+  const cameraId = routeCameraId || (fullView ? cameras[0]?.id || "" : "");
+  const validTime = !at || Number.isFinite(Date.parse(at));
+  const dayParam = routeDay || (fullView ? (at && validTime ? portalDateInput(at) : portalTodayDateInput()) : "");
+  const [selectionCameraId, setSelectionCameraId] = useState(routeCameraId);
+  const [selectionDay, setSelectionDay] = useState(routeDay);
+  const [selectionError, setSelectionError] = useState("");
+  const [selectionLoading, setSelectionLoading] = useState(false);
+  const [day, setDay] = useState<RecordingDay | null>(null);
+  const [selected, setSelected] = useState<RecordingTimelineClip | null>(null);
+  const [timelineSecond, setTimelineSecond] = useState(0);
+  const [pendingSecond, setPendingSecond] = useState<number | null>(null);
+  const [playbackLimitSecond, setPlaybackLimitSecond] = useState<number | null>(null);
   const [loading, setLoading] = useState(false);
-  const [nameQuery, setNameQuery] = useState("");
+  const [error, setError] = useState("");
+  const [cameraError, setCameraError] = useState("");
+  const [revision, setRevision] = useState(0);
+  const [autoRetry, setAutoRetry] = useState(0);
+  const [isPlaying, setIsPlaying] = useState(false);
+  const [videoTime, setVideoTime] = useState(0);
+  const [zoom, setZoom] = useState(1);
+  const [playbackRate, setPlaybackRate] = useState(1);
+  const [settingsOpen, setSettingsOpen] = useState(false);
+  const [pointerEnabled, setPointerEnabled] = useState(false);
+  const [pointerPosition, setPointerPosition] = useState<{ x: number; y: number } | null>(null);
+  const [pan, setPan] = useState({ x: 0, y: 0 });
+  const [videoBox, setVideoBox] = useState({ width: 0, height: 0 });
+  const [speedOpen, setSpeedOpen] = useState(false);
+  const [isDraggingVideo, setIsDraggingVideo] = useState(false);
 
   useEffect(() => {
-    fetchCameras().then((rows) => {
-      setCameras(rows);
-      if (rows[0]) setCameraId(rows[0].id);
-    });
-  }, []);
+    let cancelled = false;
+    fetchCameras().then(rows => { if (!cancelled) { setCameras(rows); setCameraError(""); } })
+      .catch(() => { if (!cancelled) setCameraError("Could not load cameras. Please retry."); });
+    return () => { cancelled = true; };
+  }, [revision]);
 
-  const load = async () => {
-    if (!cameraId || !day) return;
+  useEffect(() => {
+    let cancelled = false;
+    const canAutoRetry = Boolean(at) && isRecentDetection(at);
+    setDay(null); setSelected(null); setTimelineSecond(0); setPendingSecond(null); setPlaybackLimitSecond(null); setError("");
+    if (!fullView) { setLoading(false); return; }
+    if (!validTime) { setError("This recording link contains an invalid timestamp."); setLoading(false); return; }
+    if (!cameraId || !dayParam) { setLoading(false); return; }
     setLoading(true);
-    try {
-      const rows = await fetchRecordings(cameraId, day);
-      setClips(rows);
-      setSelected((current) =>
-        current && rows.some((clip) => clip.filename === current.filename) ? current : rows[0] || null,
-      );
-    } finally {
-      setLoading(false);
+
+    async function load() {
+      try {
+        if (at) {
+          const match = await fetchRecordingAt(cameraId, at, eventId);
+          if (cancelled) return;
+
+          setSelected(match.clip);
+          setTimelineSecond(match.timeline_second);
+          setPendingSecond(match.timeline_second);
+          setLoading(false);
+
+          try {
+            const manifest = await fetchRecordingDay(cameraId, match.clip.day);
+            if (cancelled) return;
+            const playbackWindow = detectionPlaybackWindow(manifest, match.timeline_second, eventId);
+            const targetSecond = playbackWindow?.startSecond ?? match.timeline_second;
+            const nextClip = findClip(manifest, targetSecond) || findClip(manifest, match.timeline_second) || match.clip;
+            setDay(manifest);
+            setSelected(nextClip);
+            setTimelineSecond(targetSecond);
+            setPendingSecond(targetSecond);
+            setPlaybackLimitSecond(playbackWindow?.endSecond ?? null);
+          } catch {
+            if (!cancelled) setDay(null);
+          }
+          return;
+        }
+
+        const manifest = await fetchRecordingDay(cameraId, dayParam);
+        if (cancelled) return;
+        const nextSecond = Math.max(0, manifest.clips[0]?.start_second ?? 0);
+        const nextClip = findClip(manifest, nextSecond);
+        setDay(manifest);
+        setTimelineSecond(nextSecond);
+        setSelected(nextClip);
+        setPendingSecond(nextClip ? nextSecond : null);
+        setPlaybackLimitSecond(null);
+        if (!nextClip && manifest.clips.length === 0) {
+          setError("No recordings found for this date.");
+        } else if (!nextClip) {
+          setError("No footage is available at the selected time.");
+        }
+      } catch (e) {
+        if (!cancelled) {
+          if (canAutoRetry && autoRetry < RECORDING_JUMP_MAX_RETRIES) {
+            window.setTimeout(() => {
+              if (!cancelled) setAutoRetry(value => value + 1);
+            }, RECORDING_JUMP_RETRY_DELAY_MS);
+          } else {
+            setError((e as Error).message);
+          }
+        }
+      } finally { if (!cancelled) setLoading(false); }
     }
-  };
+
+    void load();
+    return () => { cancelled = true; };
+  }, [cameraId, dayParam, at, eventId, validTime, revision, autoRetry, fullView]);
 
   useEffect(() => {
-    if (cameraId) load();
-  }, [cameraId, day]);
+    setAutoRetry(0);
+  }, [cameraId, at]);
 
-  const filteredClips = useMemo(() => {
-    const q = nameQuery.trim().toLowerCase();
-    if (!q) return clips;
+  useEffect(() => {
+    if (fullView) return;
+    setSelectionCameraId(routeCameraId);
+    setSelectionDay(routeDay);
+    setSelectionError("");
+  }, [fullView, routeCameraId, routeDay]);
 
-    return clips.filter((clip) =>
-      [clip.display_name, clip.filename].some((value) => value.toLowerCase().includes(q)),
-    );
-  }, [clips, nameQuery]);
+  useEffect(() => {
+    setIsPlaying(false);
+    setVideoTime(0);
+    setZoom(1);
+    setPlaybackRate(1);
+    setSettingsOpen(false);
+    setPointerPosition(null);
+    setPan({ x: 0, y: 0 });
+    setVideoBox({ width: 0, height: 0 });
+    setSpeedOpen(false);
+    setIsDraggingVideo(false);
+  }, [selected?.url]);
 
-  return (
-    <main className="page">
-      <div className="page-inner">
-        <h2 className="page-title">Recordings</h2>
-        <p className="page-sub">Search and play saved camera recordings.</p>
+  useEffect(() => {
+    setPan((current) => clampPanToZoom(current, zoom, videoStageRef.current, videoRef.current));
+  }, [zoom]);
 
-        {/* Filters */}
-        <div className="recording-card">
-          <div className="recording-filters">
+  useEffect(() => {
+    const stage = videoStageRef.current;
+    if (!stage || typeof ResizeObserver === "undefined") return;
+    const observer = new ResizeObserver(() => {
+      setVideoBox(containedVideoBox(stage, videoRef.current));
+      setPan((current) => clampPanToZoom(current, zoom, stage, videoRef.current));
+    });
+    observer.observe(stage);
+    return () => observer.disconnect();
+  }, [zoom, selected?.url]);
+
+  useEffect(() => {
+    if (!selected || !day) return;
+    const index = day.clips.findIndex((clip) => clip.url === selected.url);
+    const neighbors = [day.clips[index - 1], day.clips[index + 1]].filter(Boolean);
+    const links = neighbors.map((clip) => {
+      const link = document.createElement("link");
+      link.rel = "prefetch";
+      link.as = "video";
+      link.href = `${API_URL}${clip.url}`;
+      document.head.appendChild(link);
+      return link;
+    });
+    return () => {
+      links.forEach((link) => link.remove());
+    };
+  }, [day, selected?.url]);
+
+  const load = () => { setAutoRetry(0); setRevision(value => value + 1); };
+
+  async function openSelectedRecording() {
+    if (!selectionCameraId || !selectionDay) {
+      setSelectionError("Choose a camera and date first.");
+      return;
+    }
+
+    setSelectionLoading(true);
+    setSelectionError("");
+    try {
+      const manifest = await fetchRecordingDay(selectionCameraId, selectionDay);
+      if (!manifest.clips.length) {
+        setSelectionError("No recording available for this camera on the selected date.");
+        return;
+      }
+      navigate(`/recordings/player?${new URLSearchParams({ camera: selectionCameraId, day: selectionDay })}`);
+    } catch (error) {
+      setSelectionError((error as Error).message || "No recording available for this camera on the selected date.");
+    } finally {
+      setSelectionLoading(false);
+    }
+  }
+
+  function seekTo(second: number, play = false, limitSecond: number | null = null, direction: -1 | 1 = 1) {
+    if (!day) return;
+    const clamped = clampTimelineSecond(second);
+    const clip = nearestClip(day, clamped, direction);
+    const targetSecond = clip
+      ? Math.max(clip.start_second, Math.min(clamped, Math.max(clip.start_second, clip.end_second - 0.05)))
+      : clamped;
+    setTimelineSecond(targetSecond);
+    setPlaybackLimitSecond(limitSecond);
+    setError("");
+
+    if (!clip) {
+      setSelected(null);
+      setPendingSecond(null);
+      setError("No footage is available at this time.");
+      return;
+    }
+
+    setPendingSecond(targetSecond);
+    setSelected(clip);
+    const video = videoRef.current;
+    if (video && selected?.url === clip.url) {
+      video.currentTime = Math.max(0, targetSecond - clip.start_second);
+      if (play) void video.play().catch(() => undefined);
+    }
+  }
+
+  function togglePlayback() {
+    const video = videoRef.current;
+    if (!video) return;
+
+    if (video.paused) {
+      void video.play().catch(() => undefined);
+    } else {
+      video.pause();
+    }
+  }
+
+  function seekWithinClip(nextTime: number) {
+    if (!selected) return;
+    const targetSecond = selected.start_second + nextTime;
+    seekTo(targetSecond, isPlaying, null, nextTime >= videoTime ? 1 : -1);
+  }
+
+  function rewind10Seconds() {
+    seekWithinClip(videoTime - 10);
+  }
+
+  function forward10Seconds() {
+    seekWithinClip(videoTime + 10);
+  }
+
+  function stepBackward() {
+    seekWithinClip(videoTime - (1 / 30));
+  }
+
+  function stepForward() {
+    seekWithinClip(videoTime + (1 / 30));
+  }
+
+  function changePlaybackRate(nextRate: number) {
+    setPlaybackRate(nextRate);
+    setSpeedOpen(false);
+    if (videoRef.current) videoRef.current.playbackRate = nextRate;
+  }
+
+  function goToLive() {
+    if (!cameraId) {
+      setError("Camera is currently down.");
+      return;
+    }
+    navigate(`/cameras/${encodeURIComponent(cameraId)}`);
+  }
+
+  function changeZoom(nextZoom: number) {
+    const value = clampZoom(nextZoom);
+    setZoom(value);
+    setPan((current) => clampPanToZoom(current, value, videoStageRef.current, videoRef.current));
+  }
+
+  function zoomIn() {
+    setZoom((current) => clampZoom(current + 0.25));
+  }
+
+  function zoomOut() {
+    setZoom((current) => clampZoom(current - 0.25));
+  }
+
+  function captureSnapshot() {
+    const video = videoRef.current;
+    if (!video || video.videoWidth === 0 || video.videoHeight === 0) return;
+
+    try {
+      const canvas = document.createElement("canvas");
+      canvas.width = video.videoWidth;
+      canvas.height = video.videoHeight;
+      const context = canvas.getContext("2d");
+      if (!context) return;
+      context.drawImage(video, 0, 0, canvas.width, canvas.height);
+      canvas.toBlob((blob) => {
+        if (!blob) {
+          setError("Snapshot capture is not available for this video source.");
+          return;
+        }
+        const url = URL.createObjectURL(blob);
+        const link = document.createElement("a");
+        link.download = `${cameraName || "camera"}-${timeLabel(timelineSecond).replace(/:/g, "-")}.png`;
+        link.href = url;
+        document.body.appendChild(link);
+        link.click();
+        link.remove();
+        URL.revokeObjectURL(url);
+      }, "image/png");
+    } catch {
+      setError("Snapshot capture is not available for this video source.");
+    }
+  }
+
+  function createClip() {
+    setSettingsOpen(false);
+  }
+
+  function openStreamAction() {
+    setPointerEnabled((value) => !value);
+  }
+
+  function toggleFullscreen() {
+    const element = videoStageRef.current;
+    if (!element) return;
+    if (document.fullscreenElement) {
+      void document.exitFullscreen().catch(() => undefined);
+    } else {
+      void element.requestFullscreen().catch(() => undefined);
+    }
+  }
+
+  function closePlayer() {
+    if (returnTo) {
+      navigate(returnTo);
+      return;
+    }
+
+    const closeParams = new URLSearchParams();
+    if (cameraId) closeParams.set("camera", cameraId);
+    if (day?.day || dayParam) closeParams.set("day", day?.day || dayParam);
+    navigate(`/recordings${closeParams.size ? `?${closeParams}` : ""}`);
+  }
+
+  function handleVideoPointer(event: MouseEvent<HTMLDivElement>) {
+    if (!pointerEnabled) return;
+    const bounds = event.currentTarget.getBoundingClientRect();
+    const x = ((event.clientX - bounds.left) / bounds.width) * 100;
+    const y = ((event.clientY - bounds.top) / bounds.height) * 100;
+    setPointerPosition({
+      x: Math.max(0, Math.min(100, x)),
+      y: Math.max(0, Math.min(100, y)),
+    });
+  }
+
+  function handleVideoPanStart(event: PointerEvent<HTMLDivElement>) {
+    if (zoom <= 1 || pointerEnabled || isPlayerControlTarget(event.target)) return;
+    event.preventDefault();
+    event.currentTarget.setPointerCapture(event.pointerId);
+    dragStartRef.current = {
+      pointerId: event.pointerId,
+      x: event.clientX,
+      y: event.clientY,
+      panX: pan.x,
+      panY: pan.y,
+    };
+    setIsDraggingVideo(true);
+  }
+
+  function handleVideoPanMove(event: PointerEvent<HTMLDivElement>) {
+    const drag = dragStartRef.current;
+    if (!drag || drag.pointerId !== event.pointerId) return;
+    event.preventDefault();
+    const nextPan = {
+      x: drag.panX + event.clientX - drag.x,
+      y: drag.panY + event.clientY - drag.y,
+    };
+    setPan(clampPanToZoom(nextPan, zoom, event.currentTarget, videoRef.current));
+  }
+
+  function handleVideoPanEnd(event: PointerEvent<HTMLDivElement>) {
+    const drag = dragStartRef.current;
+    if (drag?.pointerId === event.pointerId) {
+      dragStartRef.current = null;
+      setIsDraggingVideo(false);
+      if (event.currentTarget.hasPointerCapture(event.pointerId)) {
+        event.currentTarget.releasePointerCapture(event.pointerId);
+      }
+    }
+  }
+
+  const activeClipOffset = selected ? Math.max(0, timelineSecond - selected.start_second) : 0;
+  const cameraName = cameras.find(camera => camera.id === cameraId)?.name || cameraId;
+  const currentPlaybackDate = playbackDate(day, timelineSecond);
+
+  if (!fullView) {
+    return (
+      <main className="page recordings-selection-page">
+        <div className="page-inner recordings-selection-inner">
+          <h2 className="page-title">Recordings</h2>
+          <p className="page-sub">Choose a camera and date to view recordings.</p>
+
+          <form
+            className="recordings-selection-form"
+            onSubmit={(event) => {
+              event.preventDefault();
+              void openSelectedRecording();
+            }}
+          >
             <label>
-              Camera
+              <span>Camera</span>
               <select
                 className="input"
-                value={cameraId}
-                onChange={(e) => {
-                  setCameraId(e.target.value);
-                  setNameQuery("");
+                value={selectionCameraId}
+                onChange={(event) => {
+                  setSelectionCameraId(event.target.value);
+                  setSelectionError("");
                 }}
               >
-                {cameras.map((c) => (
-                  <option key={c.id} value={c.id}>
-                    {c.name} ({c.id})
+                <option value="">Select camera...</option>
+                {cameras.map((camera) => (
+                  <option key={camera.id} value={camera.id}>
+                    {camera.name || camera.id}
                   </option>
                 ))}
               </select>
             </label>
 
             <label>
-              Date
+              <span>Date</span>
               <input
                 className="input"
                 type="date"
-                value={day}
-                onChange={(e) => {
-                  setDay(e.target.value);
-                  setNameQuery("");
+                value={selectionDay}
+                onChange={(event) => {
+                  setSelectionDay(event.target.value);
+                  setSelectionError("");
                 }}
               />
             </label>
 
-            <label>
-              Recording time
-              <select
-                className="input"
-                value={nameQuery}
-                onChange={(e) => setNameQuery(e.target.value)}
-                disabled={clips.length === 0}
-              >
-                <option value="">All recordings</option>
-                {clips.map((clip) => (
-                  <option key={clip.filename} value={clip.display_name}>
-                    {clip.display_name}
-                  </option>
-                ))}
-              </select>
-            </label>
+            {selectionError ? <p className="recordings-selection-error" role="alert">{selectionError}</p> : null}
 
-            <button className="btn primary" onClick={load} disabled={loading}>
-              {loading ? "Loading…" : "Search"}
+            <button type="submit" className="btn primary" disabled={selectionLoading}>
+              {selectionLoading ? "Checking..." : "View Recording"}
             </button>
-          </div>
+          </form>
         </div>
+      </main>
+    );
+  }
 
-        {/* Player + clip list */}
-        <div className="recording-layout">
-          <div className="recording-player">
+  return (
+    <main className={fullView ? "recording-full-page" : "page"}>
+      <div className={fullView ? "recording-full-inner" : "page-inner"}>
+        {!fullView && (
+          <>
+            <h2 className="page-title">Recordings</h2>
+            <p className="page-sub">Play a full day of footage with detection markers.</p>
+          </>
+        )}
+
+        {(error || cameraError) && <div role="alert" className="alert alert-warn mb-4"><span>{error || cameraError}</span><button className="btn" onClick={load} disabled={loading}>Retry</button></div>}
+
+        <div className={`recording-layout ${fullView ? "full-view" : ""}`}>
+          <div className={`recording-player surveillance-player ${fullView ? "full-view" : ""}`}>
             {selected ? (
               <>
-                <video key={selected.url} controls autoPlay className="recording-video">
-                  <source src={`${API_URL}${selected.url}`} type="video/mp4" />
-                </video>
-
-                <div className="recording-player-info">
-                  <strong>{selected.display_name}</strong>
-                  <a className="btn" href={`${API_URL}${selected.url}`} target="_blank" rel="noreferrer">
-                    Download
-                  </a>
+                <div
+                  ref={videoStageRef}
+                  className={`recording-video-stage ${pointerEnabled ? "pointer-enabled" : ""} ${zoom > 1 && !pointerEnabled ? "is-zoomed" : ""} ${isDraggingVideo ? "is-dragging" : ""}`}
+                  onClick={handleVideoPointer}
+                  onPointerDown={handleVideoPanStart}
+                  onPointerMove={handleVideoPanMove}
+                  onPointerUp={handleVideoPanEnd}
+                  onPointerCancel={handleVideoPanEnd}
+                  onLostPointerCapture={handleVideoPanEnd}
+                >
+                  <div
+                    className="recording-video-frame"
+                    style={{
+                      width: videoBox.width ? `${videoBox.width}px` : "100%",
+                      height: videoBox.height ? `${videoBox.height}px` : "100%",
+                      transform: `translate3d(${pan.x}px, ${pan.y}px, 0) scale(${zoom})`,
+                    }}
+                  >
+                    <video
+                      ref={videoRef}
+                      key={selected.url}
+                      src={`${API_URL}${selected.url}`}
+                      controls={false}
+                      autoPlay
+                      playsInline
+                      className="recording-video"
+                      onLoadedMetadata={(event) => {
+                        setVideoBox(containedVideoBox(videoStageRef.current, event.currentTarget));
+                        setPan((current) => clampPanToZoom(current, zoom, videoStageRef.current, event.currentTarget));
+                        event.currentTarget.playbackRate = playbackRate;
+                        if (pendingSecond == null) return;
+                        const nextTime = Math.max(0, pendingSecond - selected.start_second);
+                        event.currentTarget.currentTime = nextTime;
+                        setVideoTime(nextTime);
+                      }}
+                      onPlay={() => setIsPlaying(true)}
+                      onPause={() => setIsPlaying(false)}
+                      onTimeUpdate={(event) => {
+                        const nextVideoTime = event.currentTarget.currentTime;
+                        const nextTimelineSecond = clampTimelineSecond(selected.start_second + nextVideoTime);
+                        if (playbackLimitSecond != null && nextTimelineSecond >= playbackLimitSecond) {
+                          const limitedVideoTime = Math.max(0, playbackLimitSecond - selected.start_second);
+                          event.currentTarget.pause();
+                          event.currentTarget.currentTime = limitedVideoTime;
+                          setVideoTime(limitedVideoTime);
+                          setTimelineSecond(playbackLimitSecond);
+                          setPlaybackLimitSecond(null);
+                          return;
+                        }
+                        setVideoTime(nextVideoTime);
+                        setTimelineSecond(nextTimelineSecond);
+                      }}
+                      onEnded={() => {
+                        setIsPlaying(false);
+                        if (!day) return;
+                        const nextSecond = Math.min(DAY_SECONDS - 1, selected.end_second + 0.01);
+                        const nextClip = findClip(day, nextSecond);
+                        if (nextClip) seekTo(nextSecond, true, playbackLimitSecond);
+                      }}
+                      onError={() => setError("This recording cannot be played yet. It may still be saving or is no longer available. Please retry.")}
+                    />
+                  </div>
+                  <div className="recording-camera-label">
+                    <span className="recording-status-dot" />
+                    <span>{cameraName}</span>
+                  </div>
+                  <button type="button" className="recording-close-button" onClick={closePlayer} aria-label="Close player">
+                    <Icon name="close" />
+                  </button>
+                  <div className="recording-zoom-controls" aria-label="Zoom controls" onPointerDown={(event) => event.stopPropagation()}>
+                    <button type="button" onClick={zoomIn} disabled={zoom >= 4} aria-label="Zoom in">
+                      <Icon name="zoomIn" />
+                    </button>
+                    <button type="button" onClick={zoomOut} disabled={zoom <= 1} aria-label="Zoom out">
+                      <Icon name="zoomOut" />
+                    </button>
+                  </div>
+                  {pointerPosition ? (
+                    <span
+                      className="recording-pointer"
+                      style={{ left: `${pointerPosition.x}%`, top: `${pointerPosition.y}%` }}
+                      aria-hidden="true"
+                    />
+                  ) : null}
+                  <div className="recording-zoom-badge">{Math.round(zoom * 100)}%</div>
                 </div>
+
+                <Timeline day={day} value={timelineSecond} onSeek={(second) => seekTo(second, true)} />
+
+                <div className="recording-control-deck">
+                  <div className="recording-controls-left">
+                    <button type="button" className="recording-icon-button primary" onClick={togglePlayback} aria-label={isPlaying ? "Pause" : "Play"}>
+                      <Icon name={isPlaying ? "pause" : "play"} />
+                    </button>
+                    <button type="button" className="recording-icon-button" onClick={rewind10Seconds} aria-label="Rewind 10 seconds">
+                      <Icon name="rewind10" />
+                    </button>
+                    <button type="button" className="recording-icon-button" onClick={forward10Seconds} aria-label="Forward 10 seconds">
+                      <Icon name="forward10" />
+                    </button>
+                    <button type="button" className="recording-icon-button" onClick={stepBackward} aria-label="Previous frame">
+                      <Icon name="stepBack" />
+                    </button>
+                    <button type="button" className="recording-icon-button" onClick={stepForward} aria-label="Next frame">
+                      <Icon name="stepForward" />
+                    </button>
+                    <div className="recording-speed-menu">
+                      <button type="button" className={`recording-speed-trigger ${speedOpen ? "active" : ""}`} onClick={() => setSpeedOpen((value) => !value)} aria-haspopup="listbox" aria-expanded={speedOpen} aria-label="Playback speed">
+                        {playbackRate}x
+                      </button>
+                      {speedOpen ? (
+                        <div className="recording-speed-options" role="listbox" aria-label="Playback speed">
+                          {[0.25, 0.5, 1, 1.5, 2].map((rate) => (
+                            <button key={rate} type="button" className={playbackRate === rate ? "active" : ""} role="option" aria-selected={playbackRate === rate} onClick={() => changePlaybackRate(rate)}>
+                              {rate}x
+                            </button>
+                          ))}
+                        </div>
+                      ) : null}
+                    </div>
+                    <button type="button" className="recording-live-button" onClick={goToLive}>
+                      <span className="recording-status-dot" />
+                      Live
+                    </button>
+                  </div>
+
+                  <button type="button" className="recording-date-pill" onClick={() => setSettingsOpen((value) => !value)}>
+                    <span>{formatPlaybackPill(currentPlaybackDate, day?.timezone || PORTAL_TIME_ZONE)}</span>
+                    <Icon name="chevronUp" />
+                  </button>
+
+                  <div className="recording-actions-right">
+                    <button type="button" className={`recording-icon-button ${pointerEnabled ? "active" : ""}`} onClick={openStreamAction} aria-label="Stream action">
+                      <Icon name="stream" />
+                    </button>
+                    <button type="button" className="recording-icon-button" onClick={captureSnapshot} aria-label="Capture snapshot">
+                      <Icon name="camera" />
+                    </button>
+                    <button type="button" className="recording-icon-button" onClick={createClip} aria-label="Create clip">
+                      <Icon name="scissors" />
+                    </button>
+                    <button type="button" className={`recording-icon-button ${settingsOpen ? "active" : ""}`} onClick={() => setSettingsOpen((value) => !value)} aria-label="Player settings">
+                      <Icon name="settings" />
+                    </button>
+                    <button type="button" className="recording-icon-button" onClick={toggleFullscreen} aria-label="Toggle fullscreen">
+                      <Icon name="fullscreen" />
+                    </button>
+                  </div>
+                </div>
+
+                {settingsOpen ? (
+                  <div className="recording-settings-panel">
+                    <button type="button" className="recording-setting-row" onClick={() => { changeZoom(1); setPointerPosition(null); }}>
+                      <span>Reset zoom and pointer</span>
+                      <strong>{Math.round(zoom * 100)}%</strong>
+                    </button>
+                    <a className="recording-setting-row" href={`${API_URL}${selected.url}`} target="_blank" rel="noreferrer">
+                      <span>Download segment</span>
+                      <strong>{selected.display_name}</strong>
+                    </a>
+                    <div className="recording-setting-row muted">
+                      <span>{timeLabel(activeClipOffset)} in segment</span>
+                      <strong>{timeLabel(Math.max(0, selected.duration_seconds))}</strong>
+                    </div>
+                  </div>
+                ) : null}
               </>
             ) : (
-              <div className="empty">No recording selected.</div>
+              <PlayerPlaceholder loading={loading} hasError={Boolean(error || cameraError)} />
             )}
           </div>
 
-          <div className="recording-list">
-            <h3>Clips</h3>
-
-            {clips.length === 0 ? (
-              <div className="empty !border-0 !rounded-none">No recordings found for this date.</div>
-            ) : filteredClips.length === 0 ? (
-              <div className="empty !border-0 !rounded-none">No recordings match this time filter.</div>
-            ) : (
-              filteredClips.map((clip) => (
-                <button
-                  key={clip.filename}
-                  className={`recording-clip ${selected?.filename === clip.filename ? "active" : ""}`}
-                  onClick={() => setSelected(clip)}
-                >
-                  <span>{clip.display_name}</span>
-                  <small>{mb(clip.size_bytes)}</small>
-                </button>
-              ))
-            )}
-          </div>
         </div>
       </div>
     </main>
+  );
+}
+
+function PlayerPlaceholder({ loading, hasError }: { loading: boolean; hasError: boolean }) {
+  if (loading) {
+    return (
+      <div className="recording-player-placeholder loading" role="status" aria-live="polite">
+        <div className="recording-loader-frame" aria-hidden="true">
+          <span />
+          <span />
+          <span />
+        </div>
+        <strong>Retrieving video</strong>
+        <p>Preparing the selected recording.</p>
+      </div>
+    );
+  }
+
+  if (hasError) {
+    return (
+      <div className="recording-player-placeholder missing" role="status" aria-live="polite">
+        <BrokenVideoIcon />
+        <strong>Video not found</strong>
+        <p>This recording is unavailable or has not finished saving.</p>
+      </div>
+    );
+  }
+
+  return (
+    <div className="recording-player-placeholder" role="status">
+      <strong>No footage selected</strong>
+      <p>Choose a recording segment or detection marker.</p>
+    </div>
+  );
+}
+
+function Timeline({ day, value, onSeek }: { day: RecordingDay | null; value: number; onSeek: (second: number) => void }) {
+  const ticks = useMemo(() => Array.from({ length: 97 }, (_, index) => ({
+    left: `${(index / 96) * 100}%`,
+    major: index % 8 === 0,
+  })), []);
+  const detectionSegments = useMemo(() => buildDetectionSegments(day?.detections ?? []), [day?.detections]);
+  const legendCategories = useMemo(() => {
+    const present = new Set(detectionSegments.map((segment) => segment.category));
+    return (["person", "vehicle", "animal", "other"] as const).filter((category) => present.has(category));
+  }, [detectionSegments]);
+
+  return (
+    <div className="recording-timeline">
+      <div className="recording-track">
+        {legendCategories.length > 0 ? (
+          <div className="recording-detection-legend" aria-label="Detection categories">
+            {legendCategories.map((category) => (
+              <span key={category} className={`recording-detection-legend-item ${category}`}>
+                <span aria-hidden="true" />
+                {detectionCategoryLabel(category)}
+              </span>
+            ))}
+          </div>
+        ) : null}
+        <div className="recording-ticks" aria-hidden="true">
+          {ticks.map((tick, index) => <span key={index} className={tick.major ? "major" : ""} style={{ left: tick.left }} />)}
+        </div>
+        {day?.clips.map((clip) => (
+          <span
+            key={clip.filename}
+            className="recording-coverage"
+            style={{
+              left: `${(Math.max(0, clip.start_second) / DAY_SECONDS) * 100}%`,
+              width: `${((Math.min(DAY_SECONDS, clip.end_second) - Math.max(0, clip.start_second)) / DAY_SECONDS) * 100}%`,
+            }}
+          />
+        ))}
+        {detectionSegments.map((segment) => {
+          const actualEndSecond = Math.max(segment.startSecond, segment.endSecond);
+          const labels = segment.labels.slice(0, 3).join(", ");
+          const moreLabels = segment.labels.length > 3 ? ` +${segment.labels.length - 3} more` : "";
+          const tooltip = `${detectionCategoryLabel(segment.category)}\n${timeLabel(segment.startSecond)}-${timeLabel(actualEndSecond)}\n${segment.count} detection${segment.count === 1 ? "" : "s"}${labels ? `\n${labels}${moreLabels}` : ""}`;
+          const active = value >= segment.startSecond && value <= Math.max(segment.startSecond + 1, actualEndSecond);
+
+          return (
+          <button
+            key={segment.key}
+            className={`recording-range ${segment.category} ${active ? "active" : ""}`}
+            data-tooltip={tooltip}
+            style={{
+              left: `${(segment.startSecond / DAY_SECONDS) * 100}%`,
+              width: `${((actualEndSecond - segment.startSecond) / DAY_SECONDS) * 100}%`,
+            }}
+            aria-label={`${detectionCategoryLabel(segment.category)} from ${timeLabel(segment.startSecond)} to ${timeLabel(actualEndSecond)}, ${segment.count} detection${segment.count === 1 ? "" : "s"}`}
+            onClick={() => onSeek(segment.startSecond)}
+          />
+          );
+        })}
+        <span className="recording-playhead" style={{ left: `${(value / DAY_SECONDS) * 100}%` }} />
+        <input
+          type="range"
+          min={0}
+          max={DAY_SECONDS - 1}
+          step={1}
+          value={Math.floor(value)}
+          onChange={(event) => onSeek(Number(event.target.value))}
+          aria-label="Recording timeline"
+        />
+        <div className="recording-timeline-labels">
+          <span>{shortClockLabel(0)}</span>
+          <strong>{timeLabel(value)}</strong>
+          <span>{shortClockLabel(DAY_SECONDS - 1)}</span>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+function BrokenVideoIcon() {
+  return (
+    <svg className="recording-broken-icon" viewBox="0 0 72 72" aria-hidden="true" focusable="false">
+      <path d="M14 18h30a8 8 0 0 1 8 8v20a8 8 0 0 1-8 8H14z" />
+      <path d="M52 30l8-5v22l-8-5" />
+      <path d="M25 20l-5 10 8 7-7 15" />
+      <path d="M34 20l-4 8 7 6-4 18" />
+    </svg>
+  );
+}
+
+type IconName =
+  | "camera"
+  | "chevronLeft"
+  | "chevronRight"
+  | "chevronUp"
+  | "close"
+  | "forward10"
+  | "fullscreen"
+  | "pause"
+  | "play"
+  | "rewind10"
+  | "scissors"
+  | "settings"
+  | "stepBack"
+  | "stepForward"
+  | "stream"
+  | "zoomIn"
+  | "zoomOut";
+
+const ICON_PATHS: Record<IconName, string[]> = {
+  camera: ["M5 7h3l1.5-2h5L16 7h3v11H5z", "M12 10.5a3 3 0 1 0 0 6 3 3 0 0 0 0-6z"],
+  chevronLeft: ["M15 18l-6-6 6-6"],
+  chevronRight: ["M9 18l6-6-6-6"],
+  chevronUp: ["M6 15l6-6 6 6"],
+  close: ["M6 6l12 12", "M18 6L6 18"],
+  forward10: ["M13 7l5 5-5 5", "M6 8v8", "M9 9h2v6", "M14 9h1.5v6"],
+  fullscreen: ["M8 4H4v4", "M16 4h4v4", "M20 16v4h-4", "M4 16v4h4"],
+  pause: ["M8 6v12", "M16 6v12"],
+  play: ["M8 5v14l11-7z"],
+  rewind10: ["M11 7l-5 5 5 5", "M18 8v8", "M13 9h2v6", "M8.5 9H10v6"],
+  scissors: ["M4 7a2 2 0 1 0 4 0 2 2 0 0 0-4 0z", "M4 17a2 2 0 1 0 4 0 2 2 0 0 0-4 0z", "M8 8l12 8", "M8 16l12-8"],
+  settings: ["M12 8a4 4 0 1 0 0 8 4 4 0 0 0 0-8z", "M4 12h2", "M18 12h2", "M12 4v2", "M12 18v2", "M6.4 6.4l1.4 1.4", "M16.2 16.2l1.4 1.4", "M17.6 6.4l-1.4 1.4", "M7.8 16.2l-1.4 1.4"],
+  stepBack: ["M11 7l-5 5 5 5", "M17 7v10"],
+  stepForward: ["M13 7l5 5-5 5", "M7 7v10"],
+  stream: ["M5 8a10 10 0 0 1 14 0", "M8 11a6 6 0 0 1 8 0", "M12 14h.01", "M12 14v5"],
+  zoomIn: ["M11 5a6 6 0 1 0 0 12 6 6 0 0 0 0-12z", "M16 16l4 4", "M11 8v6", "M8 11h6"],
+  zoomOut: ["M11 5a6 6 0 1 0 0 12 6 6 0 0 0 0-12z", "M16 16l4 4", "M8 11h6"],
+};
+
+function Icon({ name }: { name: IconName }) {
+  return (
+    <svg viewBox="0 0 24 24" aria-hidden="true" focusable="false">
+      {ICON_PATHS[name].map((path, index) => (
+        <path key={index} d={path} />
+      ))}
+    </svg>
   );
 }

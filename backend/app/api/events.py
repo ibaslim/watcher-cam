@@ -3,6 +3,7 @@ from __future__ import annotations
 import hashlib
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
+from pathlib import PurePosixPath
 from typing import Annotated
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
@@ -236,9 +237,18 @@ def _normalize_classification_category(value: str | None) -> str | None:
         return "person"
     if raw.startswith("animal") or raw in {"cat", "dog", "bird", "horse", "cow", "sheep"}:
         return "animal"
-    if raw.startswith("vehicle") or raw in {"car", "truck", "bus", "van", "motorbike", "bicycle"}:
+    if raw.startswith("vehicle") or raw in {"car", "truck", "bus", "van", "motorbike", "motorcycle", "bicycle"}:
         return "vehicle"
     return None
+
+
+def _snapshot_url(snapshot_path: str | None) -> str | None:
+    if not snapshot_path:
+        return None
+    path = Path(snapshot_path)
+    if path.is_absolute():
+        return f"/snapshots/{path.name}"
+    return f"/snapshots/{PurePosixPath(snapshot_path).as_posix().lstrip('/')}"
 
 
 def _serialize_classification(row, *, snapshot_dir: str | None = None) -> dict:
@@ -251,7 +261,7 @@ def _serialize_classification(row, *, snapshot_dir: str | None = None) -> dict:
         if candidate.exists() and candidate.is_file():
             image = cv2.imread(str(candidate), cv2.IMREAD_COLOR) if cv2 is not None else None
             if image is None or _image_laplacian_score(image) >= 140.0:
-                image_url = f"/snapshots/{candidate.name}"
+                image_url = _snapshot_url(snapshot_name)
 
     return {
         "id": getattr(row, "id", None),
@@ -397,7 +407,7 @@ def _build_snapshot_classifications(events, *, snapshot_dir: str | None = None) 
         group = by_entity_id.get(entity_id)
         if group is None:
             snapshot_path = getattr(event, "snapshot_path", None)
-            image_url = f"/snapshots/{Path(snapshot_path).name}" if snapshot_path else None
+            image_url = _snapshot_url(snapshot_path)
             group = {
                 "id": event.id,
                 "entity_id": entity_id,
@@ -419,7 +429,7 @@ def _build_snapshot_classifications(events, *, snapshot_dir: str | None = None) 
         group["occurrence_count"] += 1
         if event.created_at.isoformat() + "Z" > group["last_seen"]:
             group["last_seen"] = event.created_at.isoformat() + "Z"
-            group["image_url"] = f"/snapshots/{Path(event.snapshot_path).name}" if event.snapshot_path else group["image_url"]
+            group["image_url"] = _snapshot_url(event.snapshot_path) if event.snapshot_path else group["image_url"]
             group["crop_url"] = group["image_url"]
             group["confidence"] = getattr(event, "confidence", None)
             group["source_event_type"] = getattr(event, "event_type", None)

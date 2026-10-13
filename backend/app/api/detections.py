@@ -13,7 +13,7 @@ from sqlalchemy import select
 
 from app.api.ws import broadcast
 from app.db import session_scope
-from app.models import CameraClassification, Event
+from app.models import CameraClassification, DetectionTrack, Event
 from app.services import alerts
 
 log = logging.getLogger(__name__)
@@ -28,6 +28,16 @@ class DetectionIn(BaseModel):
         "detection",
     ] = "detection"
     source: Literal["yolo"] = "yolo"
+    label: str | None = None
+    confidence: float | None = Field(default=None, ge=0.0, le=1.0)
+    snapshot_path: str | None = None
+    track_id: str | None = None
+
+
+class TrackSightingIn(BaseModel):
+    camera_id: str
+    track_id: str
+    category: Literal["person", "animal", "vehicle"]
     label: str | None = None
     confidence: float | None = Field(default=None, ge=0.0, le=1.0)
     snapshot_path: str | None = None
@@ -52,6 +62,7 @@ async def _save_and_broadcast(
     label: str | None,
     confidence: float | None,
     snapshot_path: str | None,
+    track_id: str | None = None,
     notify: bool,
 ) -> dict:
     ts = datetime.utcnow()
@@ -65,8 +76,20 @@ async def _save_and_broadcast(
             label=label,
             confidence=confidence,
             snapshot_path=snapshot_path,
+            track_id=track_id,
         )
         db.add(ev)
+        if track_id:
+            _upsert_track_sighting(
+                db,
+                camera_id=camera_id,
+                track_id=track_id,
+                category=_category_from_event_type(event_type) or "person",
+                label=label,
+                confidence=confidence,
+                snapshot_path=snapshot_path,
+                seen_at=ts,
+            )
         db.flush()
         event_id = ev.id
 
@@ -78,6 +101,7 @@ async def _save_and_broadcast(
         "label": label,
         "confidence": confidence,
         "snapshot_path": snapshot_path,
+        "track_id": track_id,
         "created_at": ts.isoformat() + "Z",
     }
 
@@ -97,6 +121,59 @@ def _fingerprint_distance(a: str | None, b: str | None) -> int:
         return 999
 
     return sum(1 for x, y in zip(a, b) if x != y)
+
+
+def _category_from_event_type(event_type: str) -> str | None:
+    if event_type == "person_detected":
+        return "person"
+    if event_type == "vehicle_detected":
+        return "vehicle"
+    if event_type == "animal_detected":
+        return "animal"
+    return None
+
+
+def _upsert_track_sighting(
+    session,
+    *,
+    camera_id: str,
+    track_id: str,
+    category: str,
+    label: str | None,
+    confidence: float | None,
+    snapshot_path: str | None,
+    seen_at: datetime,
+) -> None:
+    row = session.scalar(
+        select(DetectionTrack).where(
+            DetectionTrack.camera_id == camera_id,
+            DetectionTrack.track_id == track_id,
+        )
+    )
+
+    if row is None:
+        row = DetectionTrack(
+            camera_id=camera_id,
+            track_id=track_id,
+            category=category,
+            label=label,
+            confidence=confidence,
+            snapshot_path=snapshot_path,
+            first_seen=seen_at,
+            last_seen=seen_at,
+        )
+        session.add(row)
+        return
+
+    row.category = category or row.category
+    row.label = label or row.label
+    row.confidence = confidence if confidence is not None else row.confidence
+    row.snapshot_path = snapshot_path or row.snapshot_path
+    if seen_at < row.first_seen:
+        row.first_seen = seen_at
+    if seen_at > row.last_seen:
+        row.last_seen = seen_at
+    row.updated_at = datetime.utcnow()
 
 
 def _next_entity_id(session, *, camera_id: str, category: str) -> str:
@@ -240,6 +317,24 @@ def ingest_classification(payload: ClassificationIn) -> dict:
     return {"ok": True, "created": created, "classification_id": item_id, "entity_id": entity_id}
 
 
+@router.post("/tracks")
+def ingest_track_sighting(payload: TrackSightingIn) -> dict:
+    ts = datetime.utcnow()
+    with session_scope() as db:
+        _upsert_track_sighting(
+            db,
+            camera_id=payload.camera_id,
+            track_id=payload.track_id,
+            category=payload.category,
+            label=payload.label,
+            confidence=payload.confidence,
+            snapshot_path=payload.snapshot_path,
+            seen_at=ts,
+        )
+
+    return {"ok": True}
+
+
 @router.post("")
 async def ingest(payload: DetectionIn) -> dict:
     log.info(
@@ -256,5 +351,6 @@ async def ingest(payload: DetectionIn) -> dict:
         label=payload.label,
         confidence=payload.confidence,
         snapshot_path=payload.snapshot_path,
+        track_id=payload.track_id,
         notify=True,
     )

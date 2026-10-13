@@ -83,6 +83,9 @@ class Settings(BaseSettings):
     object_track_match_iou: float = 0.30
     object_move_realert_px: float = 120.0
     object_move_realert_ratio: float = 0.20
+    vehicle_repeat_alert_suppress_sec: float = 43200.0
+    vehicle_repeat_alert_match_iou: float = 0.12
+    vehicle_repeat_alert_match_px: float = 45.0
     camera_open_timeout_sec: float = 45.0
 
     camera_refresh_sec: int = 30

@@ -1,5 +1,6 @@
 import { useEffect, useState } from "react";
-import { API_URL, EventRow } from "../lib/api";
+import { Link } from "react-router-dom";
+import { API_URL, EventRow, recordingLink } from "../lib/api";
 import { formatPortalDateTime, PORTAL_TIME_ZONE_LABEL } from "../lib/time";
 
 type Props = { events: EventRow[] };
@@ -53,7 +54,7 @@ export function EventLog({ events }: Props) {
                 }}
               >
                 {event.snapshot_url ? (
-                  <img src={`${API_URL}${event.snapshot_url}`} alt="" width={48} height={48} className="w-12 h-12 rounded border border-verkada-border object-cover" />
+                  <img src={`${API_URL}${event.snapshot_url}`} alt="Detection screenshot" width={48} height={48} className="w-12 h-12 rounded border border-verkada-border object-cover" />
                 ) : (
                   <div className="w-12 h-12 rounded border border-verkada-border bg-verkada-canvas flex items-center justify-center text-theme-muted font-bold" aria-hidden>
                     !
@@ -117,7 +118,25 @@ function EventDetail({ event, onClose }: { event: EventRow; onClose: () => void 
 
         <div className="event-modal-img">
           {event.snapshot_url ? (
-            <img src={`${API_URL}${event.snapshot_url}`} alt="event snapshot" width={640} height={360} />
+            <Link
+              to={recordingLink(event.camera_id, event.created_at, event.id)}
+              aria-label="Play recording at this detection"
+              title="Click image to play video footage at this detection time"
+              className="group relative block w-full h-full cursor-pointer overflow-hidden"
+            >
+              <img
+                src={`${API_URL}${event.snapshot_url}`}
+                alt="event snapshot"
+                width={640}
+                height={360}
+                className="w-full h-full object-contain transition-transform duration-200 group-hover:scale-[1.02]"
+              />
+              <div className="absolute inset-0 flex items-center justify-center bg-black/40 opacity-0 transition-opacity duration-200 group-hover:opacity-100">
+                <span className="flex items-center gap-2 rounded-full bg-blue-600/90 px-4 py-2 text-xs font-semibold text-white shadow-lg backdrop-blur-sm">
+                  ▶ Play Video Footage
+                </span>
+              </div>
+            </Link>
           ) : (
             <div className="event-modal-noimg">
               <span>No snapshot for this event</span>
@@ -125,6 +144,7 @@ function EventDetail({ event, onClose }: { event: EventRow; onClose: () => void 
           )}
         </div>
 
+        <Link className="btn primary mb-4" to={recordingLink(event.camera_id, event.created_at, event.id)}>Play recording at this time ↗</Link>
         <dl className="event-detail-grid">
           <Detail label="Event">{event.event_type}</Detail>
           <Detail label="Camera">{event.camera_id}</Detail>

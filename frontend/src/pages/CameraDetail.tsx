@@ -1,42 +1,61 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
-import { useParams } from "react-router-dom";
+import { Link, useLocation, useNavigate, useParams } from "react-router-dom";
 import {
   API_URL,
   Camera,
   ClassificationRow,
   EventRow,
   MEDIAMTX_URL,
+  Site,
   fetchClassifications,
   fetchEvents,
+  recordingLink,
 } from "../lib/api";
-import { formatPortalDateTime, PORTAL_TIME_ZONE_LABEL } from "../lib/time";
+import { getDetectionCategory } from "../lib/detectionCategories";
+import { PORTAL_TIME_ZONE } from "../lib/time";
 import { startWhep, WhepHandle } from "../lib/whep";
 import { connectEvents } from "../lib/ws";
 
-type Props = { cameras: Camera[] };
+type Props = { cameras: Camera[]; sites: Site[]; isAdmin: boolean };
+type EvidenceFilter = "all" | "person" | "vehicle" | "animal";
 
-export function CameraDetail({ cameras }: Props) {
+const EVENT_PAGE_SIZE = 24;
+
+function eventTypeForFilter(filter: EvidenceFilter): string | undefined {
+  if (filter === "person") return "person_detected";
+  if (filter === "vehicle") return "vehicle_detected";
+  if (filter === "animal") return "animal_detected";
+  return undefined;
+}
+
+function fullViewRecordingLink(cameraId: string, at: string, eventId?: number, returnTo?: string): string {
+  const url = recordingLink(cameraId, at, eventId, returnTo);
+  return url.replace("/recordings?", "/recordings/player?");
+}
+
+export function CameraDetail({ cameras, sites, isAdmin }: Props) {
   const { cameraId } = useParams();
+  const location = useLocation();
+  const navigate = useNavigate();
   const videoRef = useRef<HTMLVideoElement>(null);
+  const loadMoreRef = useRef<HTMLDivElement>(null);
+  const mountedRef = useRef(true);
+  const loadingPageRef = useRef(false);
+  const loadKeyRef = useRef(0);
+  const evidenceRefreshTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+
   const [status, setStatus] = useState<"connecting" | "live" | "error">("connecting");
   const [events, setEvents] = useState<EventRow[]>([]);
-  const [classifications, setClassifications] = useState<ClassificationRow[]>([]);
+  const [eventOffset, setEventOffset] = useState(0);
+  const [hasMoreEvents, setHasMoreEvents] = useState(true);
   const [loadingEvents, setLoadingEvents] = useState(false);
-  const [loadingClassifications, setLoadingClassifications] = useState(false);
-  const [activeEvidenceTab, setActiveEvidenceTab] = useState<"snapshots" | "detections">("snapshots");
-  const [snapshotFilter, setSnapshotFilter] = useState<"all" | "person" | "animal" | "vehicle">("all");
-  const [detectionFilter, setDetectionFilter] = useState<"all" | "person" | "animal" | "vehicle">("all");
-  const [selectedEntityId, setSelectedEntityId] = useState<string | null>(null);
-  const [classificationStartDate, setClassificationStartDate] = useState("");
-  const [classificationStartTime, setClassificationStartTime] = useState("");
-  const [classificationEndDate, setClassificationEndDate] = useState("");
-  const [classificationEndTime, setClassificationEndTime] = useState("");
-  const [snapshotPage, setSnapshotPage] = useState(1);
-  const [detectionPage, setDetectionPage] = useState(1);
-  const [selectedMedia, setSelectedMedia] = useState<{ src: string; title: string; meta: string } | null>(null);
-  const mountedRef = useRef(true);
-
+  const [loadingMoreEvents, setLoadingMoreEvents] = useState(false);
+  const [eventFilter, setEventFilter] = useState<EvidenceFilter>("all");
+  const [classificationPreviewByEntity, setClassificationPreviewByEntity] = useState<Record<string, ClassificationRow>>({});
   const camera = cameras.find((item) => item.id === cameraId);
+  const site = sites.find((item) => item.id === camera?.site_id);
+  const latestEvent = events[0];
+  const latestLabel = latestEvent ? (latestEvent.label || latestEvent.event_type.replace(/_/g, " ")) : "No recent detections";
 
   useEffect(() => {
     if (!videoRef.current || !camera) {
@@ -49,7 +68,6 @@ export function CameraDetail({ cameras }: Props) {
     let connectTimer: ReturnType<typeof setTimeout> | null = null;
     let retryScheduled = false;
     let cancelled = false;
-    const connectDelayMs = stableDelay(camera.id, 12000);
 
     const scheduleRetry = () => {
       if (cancelled || retryScheduled) return;
@@ -57,7 +75,7 @@ export function CameraDetail({ cameras }: Props) {
       retryTimer = setTimeout(() => {
         retryScheduled = false;
         connect();
-      }, 5000 + connectDelayMs);
+      }, 3000);
     };
 
     const connect = async () => {
@@ -93,77 +111,133 @@ export function CameraDetail({ cameras }: Props) {
       }
     };
 
-    const initialTimer = setTimeout(connect, connectDelayMs);
+    connect();
 
     return () => {
       cancelled = true;
-      clearTimeout(initialTimer);
       if (retryTimer) clearTimeout(retryTimer);
       if (connectTimer) clearTimeout(connectTimer);
       handle?.stop();
     };
   }, [camera?.id]);
 
-  const refreshEvidence = useCallback(async () => {
+  const normalizeEvidenceCategory = useCallback((value: string | null | undefined): EvidenceFilter | "motion" => {
+    const category = getDetectionCategory(value);
+    return category === "other" ? "motion" : category;
+  }, []);
+
+  const mergeEvents = useCallback((current: EventRow[], nextRows: EventRow[]) => {
+    const seen = new Set<number>();
+    return [...current, ...nextRows].filter((event) => {
+      if (seen.has(event.id)) return false;
+      seen.add(event.id);
+      return true;
+    });
+  }, []);
+
+  const loadEventsPage = useCallback(async (offset: number, mode: "replace" | "append") => {
     if (!camera) return;
+    if (loadingPageRef.current) return;
+    loadingPageRef.current = true;
+    const loadKey = ++loadKeyRef.current;
+    if (mode === "append") setLoadingMoreEvents(true);
+    else setLoadingEvents(true);
 
-    const classificationDateFrom = buildRangeBoundary(classificationStartDate, classificationStartTime, false);
-    const classificationDateTo = buildRangeBoundary(classificationEndDate, classificationEndTime, true);
-
-    setLoadingEvents(true);
     try {
       const rows = await fetchEvents({
         camera_id: camera.id,
-        entity_id: selectedEntityId || undefined,
-        limit: selectedEntityId ? 200 : 50,
+        event_type: eventTypeForFilter(eventFilter),
+        limit: EVENT_PAGE_SIZE,
+        offset,
       });
-      if (mountedRef.current) setEvents(rows);
-    } catch {
-      if (mountedRef.current) setEvents([]);
-    } finally {
-      if (mountedRef.current) setLoadingEvents(false);
-    }
 
-    setLoadingClassifications(true);
-    try {
-      const rows = await fetchClassifications(camera.id, undefined, 48, {
-        date_from: classificationDateFrom,
-        date_to: classificationDateTo,
-      });
-      if (mountedRef.current) setClassifications(rows);
-    } catch {
-      if (mountedRef.current) setClassifications([]);
+      if (!mountedRef.current || loadKey !== loadKeyRef.current) return;
+
+      setHasMoreEvents(rows.length === EVENT_PAGE_SIZE);
+      setEventOffset(offset + rows.length);
+      setEvents((current) => mode === "append" ? mergeEvents(current, rows) : rows);
     } finally {
-      if (mountedRef.current) setLoadingClassifications(false);
+      if (loadKey === loadKeyRef.current) loadingPageRef.current = false;
+      if (mountedRef.current && loadKey === loadKeyRef.current) {
+        setLoadingEvents(false);
+        setLoadingMoreEvents(false);
+      }
     }
-  }, [camera?.id, classificationEndDate, classificationEndTime, classificationStartDate, classificationStartTime, selectedEntityId]);
+  }, [camera?.id, eventFilter, mergeEvents]);
+
+  const refreshEvidence = useCallback(async () => {
+    loadKeyRef.current += 1;
+    loadingPageRef.current = false;
+    setHasMoreEvents(true);
+    setEventOffset(0);
+    await loadEventsPage(0, "replace");
+  }, [loadEventsPage]);
+
+  const loadNextPage = useCallback(() => {
+    if (loadingEvents || loadingMoreEvents || !hasMoreEvents) return;
+    void loadEventsPage(eventOffset, "append");
+  }, [eventOffset, hasMoreEvents, loadEventsPage, loadingEvents, loadingMoreEvents]);
 
   useEffect(() => {
     mountedRef.current = true;
     return () => {
       mountedRef.current = false;
+      if (evidenceRefreshTimerRef.current) {
+        clearTimeout(evidenceRefreshTimerRef.current);
+        evidenceRefreshTimerRef.current = null;
+      }
     };
   }, []);
 
   useEffect(() => {
     if (!camera) return;
-
     void refreshEvidence();
+  }, [camera?.id, eventFilter, refreshEvidence]);
 
-    return () => {};
-  }, [camera?.id, refreshEvidence]);
+  const buildClassificationPreviews = useCallback(async () => {
+    if (!camera) {
+      return {};
+    }
+
+    const rows = await fetchClassifications(camera.id, undefined, 500);
+    const next: Record<string, ClassificationRow> = {};
+    for (const row of rows) {
+      const previewUrl = row.crop_url || row.image_url;
+      if (row.entity_id && previewUrl && !next[row.entity_id]) {
+        next[row.entity_id] = row;
+      }
+    }
+    return next;
+  }, [camera?.id]);
+
+  const refreshClassificationPreviews = useCallback(async () => {
+    setClassificationPreviewByEntity(await buildClassificationPreviews());
+  }, [buildClassificationPreviews]);
+
+  useEffect(() => {
+    let cancelled = false;
+    buildClassificationPreviews()
+      .then((next) => {
+        if (!cancelled) setClassificationPreviewByEntity(next);
+      })
+      .catch(() => {
+        if (!cancelled) setClassificationPreviewByEntity({});
+      });
+
+    return () => {
+      cancelled = true;
+    };
+  }, [buildClassificationPreviews]);
 
   useEffect(() => {
     if (!camera) return;
 
-    if (selectedEntityId) {
-      return () => {};
-    }
-
     const disconnect = connectEvents((payload) => {
       if (payload.camera_id !== camera.id) return;
+      const payloadCategory = normalizeEvidenceCategory(payload.label || payload.event_type);
+      const matchesFilter = eventFilter === "all" || payloadCategory === eventFilter;
 
-      setEvents((prev) => {
+      if (matchesFilter) setEvents((prev) => {
         const nextEvent = {
           id: payload.id,
           entity_id: null,
@@ -176,54 +250,64 @@ export function CameraDetail({ cameras }: Props) {
           snapshot_url: payload.snapshot_path ? `/snapshots/${payload.snapshot_path}` : null,
         } satisfies EventRow;
 
-        const withoutDuplicate = prev.filter((item) => item.id !== nextEvent.id);
-        return [nextEvent, ...withoutDuplicate].slice(0, 12);
+        return mergeEvents([nextEvent], prev);
       });
+
+      if (evidenceRefreshTimerRef.current) {
+        clearTimeout(evidenceRefreshTimerRef.current);
+      }
+      evidenceRefreshTimerRef.current = setTimeout(() => {
+        evidenceRefreshTimerRef.current = null;
+        if (mountedRef.current) {
+          void refreshEvidence();
+          void refreshClassificationPreviews().catch(() => {});
+        }
+      }, 750);
     });
 
     return () => {
       disconnect();
     };
-  }, [camera?.id, refreshEvidence, selectedEntityId]);
+  }, [camera?.id, eventFilter, mergeEvents, normalizeEvidenceCategory, refreshClassificationPreviews, refreshEvidence]);
 
-  const normalizeEvidenceCategory = (value: string | null | undefined) => {
-    const raw = (value || "").trim().toLowerCase();
-    if (!raw) return "all";
-    if (raw.includes("person")) return "person";
-    if (raw.includes("animal") || raw.includes("cat") || raw.includes("dog")) return "animal";
-    if (raw.includes("vehicle") || raw.includes("car") || raw.includes("truck") || raw.includes("bus")) return "vehicle";
-    return "all";
-  };
+  useEffect(() => {
+    const node = loadMoreRef.current;
+    if (!node) return;
+
+    const observer = new IntersectionObserver((entries) => {
+      if (entries.some((entry) => entry.isIntersecting)) {
+        loadNextPage();
+      }
+    }, { rootMargin: "420px 0px" });
+
+    observer.observe(node);
+    return () => observer.disconnect();
+  }, [loadNextPage]);
 
   const filteredEvents = useMemo(() => {
-    const rows = events.filter((event) => {
-      if (selectedEntityId && event.entity_id !== selectedEntityId) return false;
-      if (snapshotFilter === "all") return true;
-      return normalizeEvidenceCategory(event.label || event.event_type) === snapshotFilter;
-    });
-    return rows;
-  }, [events, selectedEntityId, snapshotFilter]);
+    if (eventFilter === "all") return events;
+    return events.filter((event) => normalizeEvidenceCategory(event.label || event.event_type) === eventFilter);
+  }, [eventFilter, events, normalizeEvidenceCategory]);
 
-  const filteredClassifications = useMemo(() => {
-    return classifications.filter((item) => detectionFilter === "all" || item.category === detectionFilter);
-  }, [classifications, detectionFilter]);
-
-  const clearClassificationRange = () => {
-    setClassificationStartDate("");
-    setClassificationStartTime("");
-    setClassificationEndDate("");
-    setClassificationEndTime("");
-    setDetectionPage(1);
-  };
-
-  const snapshotPageCount = Math.max(1, Math.ceil(filteredEvents.length / 6));
-  const detectionPageCount = Math.max(1, Math.ceil(filteredClassifications.length / 6));
-  const safeSnapshotPage = Math.min(snapshotPage, snapshotPageCount);
-  const safeDetectionPage = Math.min(detectionPage, detectionPageCount);
-  const visibleEvents = filteredEvents.slice((safeSnapshotPage - 1) * 6, safeSnapshotPage * 6);
-  const visibleClassifications = filteredClassifications.slice((safeDetectionPage - 1) * 6, safeDetectionPage * 6);
-  const latestEvent = events[0];
-  const latestLabel = latestEvent ? (latestEvent.label || latestEvent.event_type.replace(/_/g, " ")) : "Waiting for detections";
+  const groupedEvents = useMemo(() => {
+    return filteredEvents.reduce<Array<{ key: string; label: string; events: EventRow[] }>>((groups, event) => {
+      const date = new Date(event.created_at);
+      const key = Number.isFinite(date.getTime()) ? date.toISOString().slice(0, 10) : "unknown";
+      const existing = groups.find((group) => group.key === key);
+      if (existing) {
+        existing.events.push(event);
+      } else {
+        groups.push({
+          key,
+          label: Number.isFinite(date.getTime())
+            ? new Intl.DateTimeFormat("en-US", { weekday: "long", month: "long", day: "2-digit", year: "numeric" }).format(date)
+            : "Unknown date",
+          events: [event],
+        });
+      }
+      return groups;
+    }, []);
+  }, [filteredEvents]);
 
   if (!camera) {
     return (
@@ -236,433 +320,227 @@ export function CameraDetail({ cameras }: Props) {
     );
   }
 
+  const returnTo = `${location.pathname}${location.search}${location.hash}`;
+  const recordingUrl = latestEvent
+    ? recordingLink(camera.id, latestEvent.created_at, latestEvent.id, returnTo)
+    : `/recordings?${new URLSearchParams({ camera: camera.id, returnTo })}`;
+
   return (
-    <main className="flex-1 overflow-auto bg-verkada-canvas p-4 md:p-6">
-      <div className="mx-auto flex max-w-7xl flex-col gap-6">
-        <section className="overflow-hidden rounded-[28px] border border-verkada-border bg-verkada-card shadow-sm">
-          <div className="border-b border-verkada-border bg-verkada-hover px-5 py-4">
-            <div className="flex flex-wrap items-center justify-between gap-3">
-              <div>
-                <p className="text-[10px] font-semibold uppercase tracking-[0.24em] text-blue-400">Live recording</p>
-                <h2 className="text-2xl font-semibold text-theme">{camera.name}</h2>
-              </div>
-              <div className="flex flex-wrap items-center gap-2">
-                <span className="rounded-full border border-emerald-400/20 bg-emerald-500/10 px-2.5 py-1 text-[11px] font-semibold text-emerald-300">
-                  {status === "live" ? "Live" : status === "error" ? "Offline" : "Connecting"}
-                </span>
-                {camera.detect ? (
-                  <span className="rounded-full border border-verkada-border bg-verkada-hover px-2.5 py-1 text-[11px] font-semibold text-theme-muted">
-                    AI detection enabled
-                  </span>
-                ) : null}
-              </div>
+    <main className="camera-detail-page">
+      <div className="camera-detail-shell">
+        <section className="camera-live-panel" aria-label={`${camera.name} live stream`}>
+          <div className="camera-live-frame">
+            <video ref={videoRef} autoPlay playsInline muted className="camera-live-video" />
+            <div className={`camera-live-status ${status}`}>
+              <span />
+              {status === "live" ? "Live" : status === "error" ? "Camera is currently down" : "Connecting"}
             </div>
-          </div>
-
-          <div className="p-5">
-            <div className="grid gap-5 xl:grid-cols-[1.35fr_0.65fr]">
-              <div className="relative overflow-hidden rounded-[24px] border border-white/10 bg-black">
-                <video ref={videoRef} autoPlay playsInline muted className="h-[460px] w-full object-contain bg-black" />
-                <div className="absolute inset-x-0 top-0 flex items-center justify-between bg-gradient-to-b from-black/80 via-black/50 to-transparent px-4 py-4">
-                  <div>
-                    <p className="text-[10px] font-semibold uppercase tracking-[0.24em] text-slate-400">Camera feed</p>
-                    <p className="text-sm font-semibold text-white">{camera.name}</p>
-                  </div>
-                  <span className="rounded-full border border-white/15 bg-black/50 px-2.5 py-1 text-[11px] font-semibold text-slate-100 backdrop-blur-sm">
-                    {latestLabel}
-                  </span>
-                </div>
-                <div className="absolute inset-x-0 bottom-0 bg-gradient-to-t from-black/80 via-black/60 to-transparent px-4 py-4">
-                  <div className="flex flex-wrap items-end justify-between gap-3">
-                    <div>
-                      <p className="text-[10px] font-semibold uppercase tracking-[0.24em] text-slate-400">Current stream</p>
-                      <p className="text-sm font-semibold text-white">{latestLabel}</p>
-                    </div>
-                    {latestEvent?.confidence != null && (
-                      <span className="rounded-full border border-emerald-400/20 bg-emerald-500/10 px-2.5 py-1 text-[11px] font-semibold text-emerald-300">
-                        {(latestEvent.confidence * 100).toFixed(0)}% confidence
-                      </span>
-                    )}
-                  </div>
-                </div>
-              </div>
-
-              <div className="flex flex-col gap-4">
-                <div className="rounded-[24px] border border-verkada-border bg-verkada-surface p-4">
-                  <p className="text-[10px] font-semibold uppercase tracking-[0.24em] text-theme-muted">Camera details</p>
-                  <div className="mt-3 space-y-3 text-sm text-theme-muted">
-                    <div className="flex items-center justify-between gap-3">
-                      <span>Camera ID</span>
-                      <span className="font-semibold text-theme">{camera.id}</span>
-                    </div>
-                    <div className="flex items-center justify-between gap-3">
-                      <span>Recording</span>
-                      <span className="font-semibold text-theme">{camera.recording_enabled ? "Enabled" : "Disabled"}</span>
-                    </div>
-                    <div className="flex items-center justify-between gap-3">
-                      <span>Detection</span>
-                      <span className="font-semibold text-theme">{camera.detect ? "On" : "Off"}</span>
-                    </div>
-                    <div className="flex items-center justify-between gap-3">
-                      <span>Stream mode</span>
-                      <span className="font-semibold text-theme">WebRTC</span>
-                    </div>
-                  </div>
-                </div>
-
-                <div className="rounded-[24px] border border-verkada-border bg-verkada-surface p-4">
-                  <p className="text-[10px] font-semibold uppercase tracking-[0.24em] text-theme-muted">Operational status</p>
-                  <div className="mt-3 space-y-2 text-sm text-theme-muted">
-                    <div className="rounded-[16px] border border-verkada-border bg-verkada-hover p-3">
-                      <p className="font-semibold text-theme">Reliable stream delivery</p>
-                      <p className="mt-1 text-theme-muted">The live feed reconnects automatically and keeps the latest detections synced.</p>
-                    </div>
-                    <div className="rounded-[16px] border border-verkada-border bg-verkada-hover p-3">
-                      <p className="font-semibold text-theme">Evidence timeline</p>
-                      <p className="mt-1 text-theme-muted">Recent snapshots and unique detections refresh below the live view for rapid review.</p>
-                    </div>
-                  </div>
-                </div>
-              </div>
+            <div className="camera-live-meta">
+              <span>{latestLabel}</span>
+              {latestEvent?.confidence != null && <strong>{(latestEvent.confidence * 100).toFixed(0)}%</strong>}
             </div>
           </div>
         </section>
 
-        <section className="overflow-hidden rounded-[28px] border border-verkada-border bg-verkada-card shadow-sm">
-          <div className="border-b border-verkada-border bg-verkada-hover px-5 py-4">
-            <div className="flex flex-wrap items-center justify-between gap-3">
-              <div>
-                <p className="text-[10px] font-semibold uppercase tracking-[0.24em] text-blue-400">Camera evidence</p>
-                <h3 className="text-xl font-semibold text-theme">Media gallery</h3>
-              </div>
-              <div className="flex flex-wrap gap-2">
-                <button
-                  type="button"
-                  onClick={() => {
-                    setActiveEvidenceTab("snapshots");
-                    setSnapshotPage(1);
-                  }}
-                  className={`rounded-full px-3 py-1.5 text-[11px] font-semibold ${activeEvidenceTab === "snapshots" ? "bg-emerald-400 text-black" : "border border-verkada-border bg-verkada-hover text-theme"}`}
-                >
-                  Recent snapshots
-                </button>
-                <button
-                  type="button"
-                  onClick={() => {
-                    setActiveEvidenceTab("detections");
-                    setDetectionPage(1);
-                  }}
-                  className={`rounded-full px-3 py-1.5 text-[11px] font-semibold ${activeEvidenceTab === "detections" ? "bg-emerald-400 text-black" : "border border-verkada-border bg-verkada-hover text-theme"}`}
-                >
-                  Unique detections
-                </button>
-              </div>
-            </div>
+        <section className="camera-detail-titlebar">
+          <div>
+            <h1>{camera.name}</h1>
+            <p>{site?.name || camera.recorder_name || "Unassigned location"}</p>
           </div>
-
-          <div className="p-5">
-            <div className="mb-4 flex flex-wrap items-center justify-between gap-3">
-              <div className="flex flex-wrap gap-2">
-                {(["all", "person", "animal", "vehicle"] as const).map((value) => {
-                  const isActive = activeEvidenceTab === "snapshots" ? snapshotFilter === value : detectionFilter === value;
-                  const onClick = activeEvidenceTab === "snapshots"
-                    ? () => {
-                        setSnapshotFilter(value);
-                        setSnapshotPage(1);
-                      }
-                    : () => {
-                        setDetectionFilter(value);
-                        setDetectionPage(1);
-                      };
-
-                  return (
-                    <button
-                      key={value}
-                      type="button"
-                      onClick={onClick}
-                      className={`rounded-full px-3 py-1.5 text-[11px] font-semibold ${isActive ? "bg-emerald-400 text-black" : "border border-verkada-border bg-verkada-hover text-theme"}`}
-                    >
-                      {value === "all" ? "All" : value[0].toUpperCase() + value.slice(1)}
-                    </button>
-                  );
-                })}
-                {activeEvidenceTab === "snapshots" && selectedEntityId ? (
-                  <button
-                    type="button"
-                    onClick={() => {
-                      setSelectedEntityId(null);
-                      setSnapshotPage(1);
-                    }}
-                    className="rounded-full border border-emerald-400/30 bg-emerald-500/10 px-3 py-1.5 text-[11px] font-semibold text-emerald-200"
-                  >
-                    Entity {selectedEntityId} • Clear
-                  </button>
-                ) : null}
-              </div>
-
-              {activeEvidenceTab === "detections" ? (
-                <div className="grid gap-2 rounded-[20px] border border-verkada-border bg-verkada-surface p-3 text-[11px] text-theme-muted md:grid-cols-4">
-                  <label className="flex flex-col gap-1.5">
-                    <span className="font-semibold uppercase tracking-[0.18em] text-theme-muted">Start date</span>
-                    <input
-                      type="date"
-                      className="rounded-full border border-verkada-border bg-verkada-canvas px-3 py-2 text-theme"
-                      value={classificationStartDate}
-                      onChange={(event) => {
-                        setClassificationStartDate(event.target.value);
-                        setDetectionPage(1);
-                      }}
-                    />
-                  </label>
-                  <label className="flex flex-col gap-1.5">
-                    <span className="font-semibold uppercase tracking-[0.18em] text-theme-muted">Start time</span>
-                    <input
-                      type="time"
-                      className="rounded-full border border-verkada-border bg-verkada-canvas px-3 py-2 text-theme"
-                      value={classificationStartTime}
-                      onChange={(event) => {
-                        setClassificationStartTime(event.target.value);
-                        setDetectionPage(1);
-                      }}
-                    />
-                  </label>
-                  <label className="flex flex-col gap-1.5">
-                    <span className="font-semibold uppercase tracking-[0.18em] text-theme-muted">End date</span>
-                    <input
-                      type="date"
-                      className="rounded-full border border-verkada-border bg-verkada-canvas px-3 py-2 text-theme"
-                      value={classificationEndDate}
-                      onChange={(event) => {
-                        setClassificationEndDate(event.target.value);
-                        setDetectionPage(1);
-                      }}
-                    />
-                  </label>
-                  <label className="flex flex-col gap-1.5">
-                    <span className="font-semibold uppercase tracking-[0.18em] text-theme-muted">End time</span>
-                    <input
-                      type="time"
-                      className="rounded-full border border-verkada-border bg-verkada-canvas px-3 py-2 text-theme"
-                      value={classificationEndTime}
-                      onChange={(event) => {
-                        setClassificationEndTime(event.target.value);
-                        setDetectionPage(1);
-                      }}
-                    />
-                  </label>
-                  <div className="md:col-span-4 flex flex-wrap items-center gap-2 pt-1">
-                    <button
-                      type="button"
-                      onClick={clearClassificationRange}
-                      className="rounded-full border border-verkada-border bg-verkada-hover px-3 py-1.5 text-[11px] font-semibold text-theme"
-                    >
-                      Clear range
-                    </button>
-                    <span className="text-theme-muted">Filters apply to unique detections only.</span>
-                  </div>
-                </div>
-              ) : null}
-
-              <div className="flex flex-wrap items-center gap-2">
-                <button
-                  type="button"
-                  onClick={() => void refreshEvidence()}
-                  disabled={loadingEvents || loadingClassifications}
-                  className="rounded-full border border-verkada-border bg-verkada-hover px-3 py-1.5 text-[11px] font-semibold text-theme disabled:opacity-60"
-                >
-                  {loadingEvents || loadingClassifications ? "Refreshing…" : "Refresh"}
-                </button>
-                {activeEvidenceTab === "snapshots" ? (
-                  <>
-                    <span className="rounded-full border border-verkada-border bg-verkada-hover px-3 py-1.5 text-[11px] font-semibold text-theme">
-                      Page {safeSnapshotPage} of {snapshotPageCount}
-                    </span>
-                    <button
-                      type="button"
-                      onClick={() => setSnapshotPage((page) => Math.max(1, page - 1))}
-                      disabled={safeSnapshotPage <= 1}
-                      className="rounded-full border border-verkada-border bg-verkada-hover px-2.5 py-1.5 text-[11px] font-semibold text-theme disabled:opacity-50"
-                    >
-                      Prev
-                    </button>
-                    <button
-                      type="button"
-                      onClick={() => setSnapshotPage((page) => Math.min(snapshotPageCount, page + 1))}
-                      disabled={safeSnapshotPage >= snapshotPageCount}
-                      className="rounded-full border border-verkada-border bg-verkada-hover px-2.5 py-1.5 text-[11px] font-semibold text-theme disabled:opacity-50"
-                    >
-                      Next
-                    </button>
-                  </>
-                ) : (
-                  <>
-                    <span className="rounded-full border border-verkada-border bg-verkada-hover px-3 py-1.5 text-[11px] font-semibold text-theme">
-                      Page {safeDetectionPage} of {detectionPageCount}
-                    </span>
-                    <button
-                      type="button"
-                      onClick={() => setDetectionPage((page) => Math.max(1, page - 1))}
-                      disabled={safeDetectionPage <= 1}
-                      className="rounded-full border border-verkada-border bg-verkada-hover px-2.5 py-1.5 text-[11px] font-semibold text-theme disabled:opacity-50"
-                    >
-                      Prev
-                    </button>
-                    <button
-                      type="button"
-                      onClick={() => setDetectionPage((page) => Math.min(detectionPageCount, page + 1))}
-                      disabled={safeDetectionPage >= detectionPageCount}
-                      className="rounded-full border border-verkada-border bg-verkada-hover px-2.5 py-1.5 text-[11px] font-semibold text-theme disabled:opacity-50"
-                    >
-                      Next
-                    </button>
-                  </>
-                )}
-              </div>
-            </div>
-
-            {activeEvidenceTab === "snapshots" ? (
-              loadingEvents ? (
-                <div className="rounded-[20px] border border-verkada-border bg-verkada-surface p-6 text-sm text-theme-muted">Loading snapshots…</div>
-              ) : visibleEvents.length === 0 ? (
-                <div className="rounded-[20px] border border-verkada-border bg-verkada-surface p-6 text-sm text-theme-muted">
-                  No snapshots match the selected filter yet.
-                </div>
-              ) : (
-                <div className="grid gap-4 md:grid-cols-2 xl:grid-cols-3">
-                  {visibleEvents.map((event) => {
-                    const title = event.label || event.event_type.replace(/_/g, " ");
-                    const src = event.snapshot_url ? `${API_URL}${event.snapshot_url}` : null;
-                    return (
-                      <button
-                        key={event.id}
-                        type="button"
-                        onClick={() => src && setSelectedMedia({ src, title, meta: `${event.event_type} • ${formatPortalDateTime(event.created_at)} ${PORTAL_TIME_ZONE_LABEL}` })}
-                        className="overflow-hidden rounded-[24px] border border-verkada-border bg-verkada-surface text-left shadow-sm transition hover:-translate-y-0.5 hover:border-emerald-400/40"
-                      >
-                        <div className="flex items-start justify-between gap-3 border-b border-verkada-border px-3 py-2.5">
-                          <div>
-                            <p className="text-sm font-semibold text-theme">{title}</p>
-                            <p className="text-[11px] text-theme-muted">{event.event_type}</p>
-                          </div>
-                          {event.confidence != null && (
-                            <span className="rounded-full border border-emerald-400/20 bg-emerald-500/10 px-2 py-1 text-[11px] font-semibold text-emerald-300">
-                              {(event.confidence * 100).toFixed(0)}%
-                            </span>
-                          )}
-                        </div>
-                        {src ? (
-                          <img src={src} alt={title} className="h-44 w-full object-cover" />
-                        ) : (
-                          <div className="flex h-44 items-center justify-center bg-verkada-hover text-sm text-theme-muted">No snapshot available</div>
-                        )}
-                        <div className="px-3 py-2.5 text-[11px] text-theme-muted">
-                          {formatPortalDateTime(event.created_at)} {PORTAL_TIME_ZONE_LABEL}
-                        </div>
-                      </button>
-                    );
-                  })}
-                </div>
-              )
-            ) : loadingClassifications ? (
-              <div className="rounded-[20px] border border-verkada-border bg-verkada-surface p-6 text-sm text-theme-muted">Loading unique detections…</div>
-            ) : visibleClassifications.length === 0 ? (
-              <div className="rounded-[20px] border border-verkada-border bg-verkada-surface p-6 text-sm text-theme-muted">
-                No unique detections match the selected filter yet.
-              </div>
-            ) : (
-              <div className="grid gap-4 md:grid-cols-2 xl:grid-cols-3">
-                {visibleClassifications.map((item) => {
-                  const title = item.label || item.category;
-                  const src = item.image_url || item.crop_url ? `${API_URL}${(item.image_url || item.crop_url)!}` : null;
-                  const hasImage = Boolean(src);
-                  return (
-                      <div
-                        key={item.classification_key || `classification-${item.id}`}
-                        className="overflow-hidden rounded-[24px] border border-verkada-border bg-verkada-surface text-left shadow-sm transition hover:-translate-y-0.5 hover:border-emerald-400/40"
-                      >
-                        <button
-                          type="button"
-                          onClick={() => hasImage && setSelectedMedia({ src: src!, title, meta: `${item.category} • entity ${item.entity_id} • ${item.occurrence_count} appearances • last seen ${formatPortalDateTime(item.last_seen)} ${PORTAL_TIME_ZONE_LABEL}` })}
-                          className="block w-full text-left"
-                        >
-                          <div className="flex items-start justify-between gap-3 border-b border-verkada-border px-3 py-2.5">
-                            <div>
-                              <p className="text-sm font-semibold text-theme">{title}</p>
-                              <p className="text-[11px] text-theme-muted">{item.category} • entity {item.entity_id}</p>
-                            </div>
-                            {item.confidence != null && (
-                              <span className="rounded-full border border-emerald-400/20 bg-emerald-500/10 px-2 py-1 text-[11px] font-semibold text-emerald-300">
-                                {(item.confidence * 100).toFixed(0)}%
-                              </span>
-                            )}
-                          </div>
-                          {hasImage ? (
-                            <img src={src!} alt={title} className="h-44 w-full object-cover" />
-                          ) : (
-                            <div className="flex h-44 items-center justify-center bg-verkada-hover text-sm text-theme-muted">No image available</div>
-                          )}
-                        </button>
-                        <div className="flex items-center justify-between gap-3 px-3 py-2.5 text-[11px] text-theme-muted">
-                          <span>Last seen {formatPortalDateTime(item.last_seen)} {PORTAL_TIME_ZONE_LABEL}</span>
-                          <button
-                            type="button"
-                            onClick={() => {
-                              setSelectedEntityId(item.entity_id);
-                              setSnapshotFilter(item.category as "person" | "animal" | "vehicle");
-                              setSnapshotPage(1);
-                              setActiveEvidenceTab("snapshots");
-                            }}
-                            className="rounded-full border border-emerald-400/30 bg-emerald-500/10 px-3 py-1 text-[11px] font-semibold text-emerald-200"
-                          >
-                            View {item.occurrence_count} snapshots
-                          </button>
-                        </div>
-                      </div>
-                  );
-                })}
-              </div>
+          <div className="camera-action-nav" aria-label="Camera actions">
+            <button type="button" className={eventFilter === "all" ? "is-active" : ""} onClick={() => setEventFilter("all")}>
+              <DetailIcon name="motion" />
+              <span>Motion</span>
+            </button>
+            <button type="button" className={eventFilter === "all" ? "is-active" : ""} onClick={() => setEventFilter("all")}>
+              <DetailIcon name="history" />
+              <span>History</span>
+            </button>
+            <button type="button" className={eventFilter === "person" ? "is-active" : ""} onClick={() => setEventFilter("person")}>
+              <DetailIcon name="person" />
+              <span>People</span>
+            </button>
+            <button type="button" className={eventFilter === "vehicle" ? "is-active" : ""} onClick={() => setEventFilter("vehicle")}>
+              <DetailIcon name="vehicle" />
+              <span>Vehicles</span>
+            </button>
+            <button type="button" className={eventFilter === "animal" ? "is-active" : ""} onClick={() => setEventFilter("animal")}>
+              <DetailIcon name="animal" />
+              <span>Animals</span>
+            </button>
+            <Link to={recordingUrl}>
+              <DetailIcon name="archive" />
+              <span>Archive</span>
+            </Link>
+            <Link to="/reports">
+              <DetailIcon name="analytics" />
+              <span>Analytics</span>
+            </Link>
+            {isAdmin && (
+              <Link to={camera.site_id ? `/cameras?site=${encodeURIComponent(camera.site_id)}` : "/cameras"}>
+                <DetailIcon name="settings" />
+                <span>Settings</span>
+              </Link>
             )}
           </div>
         </section>
-      </div>
 
-      {selectedMedia ? (
-        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/85 px-4 py-6" onClick={() => setSelectedMedia(null)}>
-          <div className="w-full max-w-5xl overflow-hidden rounded-[28px] border border-verkada-border bg-verkada-surface shadow-2xl" onClick={(event) => event.stopPropagation()}>
-            <div className="flex items-center justify-between border-b border-verkada-border px-4 py-3">
-              <div>
-                <p className="text-[10px] font-semibold uppercase tracking-[0.24em] text-blue-400">Full view</p>
-                <p className="text-sm font-semibold text-theme">{selectedMedia.title}</p>
-              </div>
-              <button type="button" onClick={() => setSelectedMedia(null)} className="rounded-full border border-verkada-border bg-verkada-hover px-3 py-1.5 text-sm font-semibold text-theme">
-                Close
+        <section className="camera-history-section">
+          <div className="camera-history-toolbar">
+            <nav aria-label="Evidence filters">
+              {(["all", "person", "vehicle", "animal"] as const).map((value) => (
+                <button
+                  key={value}
+                  type="button"
+                  className={eventFilter === value ? "is-active" : ""}
+                  onClick={() => setEventFilter(value)}
+                >
+                  {value === "all" ? "All" : value === "person" ? "People" : value === "vehicle" ? "Vehicles" : "Animals"}
+                </button>
+              ))}
+            </nav>
+            <button type="button" className="camera-refresh-button" onClick={() => void refreshEvidence()} disabled={loadingEvents || loadingMoreEvents}>
+              {loadingEvents ? "Refreshing..." : "Refresh"}
+            </button>
+          </div>
+
+          {loadingEvents && events.length === 0 ? (
+            <div className="camera-history-empty">Loading events...</div>
+          ) : groupedEvents.length === 0 ? (
+            <div className="camera-history-empty">No events match this camera filter yet.</div>
+          ) : (
+            <div className="camera-history-groups">
+              {groupedEvents.map((group) => (
+                <section key={group.key} className="camera-history-group">
+                  <h2>{group.label}</h2>
+                  <div className="camera-event-grid">
+                    {group.events.map((event) => (
+                      <EventCard
+                        key={event.id}
+                        event={event}
+                        classificationPreview={event.entity_id ? classificationPreviewByEntity[event.entity_id] : undefined}
+                        returnTo={returnTo}
+                        onPlay={(url) => navigate(url)}
+                      />
+                    ))}
+                  </div>
+                </section>
+              ))}
+            </div>
+          )}
+
+          {hasMoreEvents && eventFilter !== "all" && (
+            <div className="camera-filter-load-more">
+              <button
+                type="button"
+                className="camera-refresh-button"
+                onClick={loadNextPage}
+                disabled={loadingEvents || loadingMoreEvents}
+              >
+                {loadingMoreEvents ? "Loading more..." : "Load more events"}
               </button>
             </div>
-            <div className="p-4">
-              <img src={selectedMedia.src} alt={selectedMedia.title} className="max-h-[70vh] w-full object-contain" />
-            </div>
-            <div className="border-t border-verkada-border px-4 py-3 text-sm text-theme-muted">
-              {selectedMedia.meta}
-            </div>
-          </div>
-        </div>
-      ) : null}
+          )}
+          <div ref={loadMoreRef} className="camera-load-sentinel" aria-hidden="true" />
+          {loadingMoreEvents && <div className="camera-history-more">Loading more...</div>}
+          {!hasMoreEvents && events.length > 0 && <div className="camera-history-more">No more events</div>}
+        </section>
+      </div>
+
     </main>
   );
 }
 
-function buildRangeBoundary(dateValue: string, timeValue: string, isEnd: boolean): string | undefined {
-  const date = dateValue.trim();
-  if (!date) return undefined;
+function EventCard({
+  event,
+  classificationPreview,
+  returnTo,
+  onPlay,
+}: {
+  event: EventRow;
+  classificationPreview?: ClassificationRow;
+  returnTo: string;
+  onPlay: (url: string) => void;
+}) {
+  const title = event.label || event.event_type.replace(/_/g, " ");
+  const src = event.snapshot_url ? `${API_URL}${event.snapshot_url}` : null;
+  const cropUrl = classificationPreview?.crop_url || classificationPreview?.image_url || null;
+  const cropSrc = cropUrl ? `${API_URL}${cropUrl}` : null;
+  const recUrl = fullViewRecordingLink(event.camera_id, event.created_at, event.id, returnTo);
+  const eventDate = new Date(event.created_at);
+  const hasRecordingTarget = Boolean(event.camera_id && Number.isFinite(eventDate.getTime()));
+  const timeLabel = Number.isFinite(eventDate.getTime())
+    ? new Intl.DateTimeFormat("en-US", { timeZone: PORTAL_TIME_ZONE, hour: "numeric", minute: "2-digit", second: "2-digit", hour12: true }).format(eventDate)
+    : "Unknown time";
+  const detectionLabel = title.toLowerCase() === event.event_type.toLowerCase().replace(/_/g, " ") ? title : `${title} ${event.event_type.replace(/_/g, " ")}`;
+  const accessibleLabel = hasRecordingTarget
+    ? `Open recording from ${timeLabel}`
+    : `Recording unavailable for ${timeLabel}`;
 
-  const time = timeValue.trim() || (isEnd ? "23:59" : "00:00");
-  return `${date}T${time}`;
+  return (
+    <article className="camera-event-shell">
+      <button
+        type="button"
+        className="camera-event-card"
+        onClick={() => {
+          if (hasRecordingTarget) onPlay(recUrl);
+        }}
+        disabled={!hasRecordingTarget}
+        aria-label={accessibleLabel}
+      >
+        <span className="camera-event-media">
+          {src ? (
+            <SnapshotImage src={src} alt="" />
+          ) : (
+            <span>No snapshot available</span>
+          )}
+          <span className="camera-event-overlay">
+            {hasRecordingTarget ? "Open recording" : "Recording unavailable"}
+          </span>
+        </span>
+        <span className="camera-event-foot">
+          <span>{timeLabel}</span>
+          <span>{detectionLabel}</span>
+          {event.confidence != null && <strong>{(event.confidence * 100).toFixed(0)}%</strong>}
+        </span>
+        {cropSrc ? (
+          <span className="camera-event-object-preview" aria-hidden="true">
+            <SnapshotImage src={cropSrc} alt="" compact />
+            <span>{classificationPreview?.label || title}</span>
+          </span>
+        ) : null}
+      </button>
+    </article>
+  );
 }
 
-function stableDelay(value: string, maxMs: number): number {
-  let hash = 0;
-  for (let i = 0; i < value.length; i += 1) {
-    hash = (hash * 31 + value.charCodeAt(i)) >>> 0;
+function SnapshotImage({ src, alt, compact = false }: { src: string; alt: string; compact?: boolean }) {
+  const [failed, setFailed] = useState(false);
+
+  if (failed) {
+    return <span className={compact ? "camera-event-image-fallback compact" : "camera-event-image-fallback"}>Snapshot unavailable</span>;
   }
-  return hash % maxMs;
+
+  return <img src={src} alt={alt} loading="lazy" onError={() => setFailed(true)} />;
+}
+
+type DetailIconName = "motion" | "history" | "person" | "vehicle" | "animal" | "archive" | "analytics" | "settings";
+
+const detailIconPaths: Record<DetailIconName, string[]> = {
+  motion: ["M4 12h4l2-6 4 12 2-6h4"],
+  history: ["M4 7v5h5", "M5 12a7 7 0 1 0 2-5"],
+  person: ["M12 12a4 4 0 1 0 0-8 4 4 0 0 0 0 8z", "M4 21a8 8 0 0 1 16 0"],
+  vehicle: ["M5 16l1.5-5h11L19 16", "M7 16h10", "M7 19h.01", "M17 19h.01"],
+  animal: ["M6 12c0-3 2-5 6-5s6 2 6 5c0 4-3 7-6 7s-6-3-6-7z", "M9 10h.01", "M15 10h.01"],
+  archive: ["M4 6h16", "M6 6v14h12V6", "M9 10h6"],
+  analytics: ["M5 19V9", "M12 19V5", "M19 19v-7"],
+  settings: ["M12 8a4 4 0 1 0 0 8 4 4 0 0 0 0-8z", "M4 12h2", "M18 12h2", "M12 4v2", "M12 18v2"],
+};
+
+function DetailIcon({ name }: { name: DetailIconName }) {
+  return (
+    <svg viewBox="0 0 24 24" aria-hidden="true" focusable="false">
+      {detailIconPaths[name].map((path, index) => <path key={index} d={path} />)}
+    </svg>
+  );
 }

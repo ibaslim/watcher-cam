@@ -222,3 +222,20 @@ docker compose down               # stop
 | No face events | `docker compose logs detector`; ensure the camera has **Face detect** on and the face bank refreshed |
 | Slow face rec | lower `FACE_SAMPLE_FPS` / keep `FACE_DET_SIZE=320` / use `FACE_MODEL=buffalo_s` |
 | Remote video won't play | `MEDIAMTX_PUBLIC_HOST` + forward TCP 8889 / UDP 8189; strict NAT needs TURN |
+
+## Detection-to-recording navigation
+
+- Click a screenshot in a camera's **Recent snapshots** or **Unique detections**,
+  or a screenshot in **Events**. Expect the Recordings page to show the same
+  camera and detection timestamp and seek to that position within the clip.
+- Try an event just after midnight whose recording began the previous day.
+  Expect the previous day's clip with the correct offset.
+- Try a missing/expired recording or a recent clip still being written. Expect
+  a clear unavailable message and **Retry**, with no unrelated video playback.
+- Use **Browse this day**, change cameras/dates, and select clips manually.
+  Expect normal recording browsing to continue working.
+- Expand the left sidebar, filter locations, select a site, and pin/unpin it.
+  Check keyboard expansion/collapse, narrow screens, and both color themes.
+
+Backend regressions: `python -m unittest discover -s tests -p test_recording_navigation.py -v`
+(from the backend directory or its container; includes real ffmpeg/ffprobe coverage).

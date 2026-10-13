@@ -1,41 +1,74 @@
-import { Camera, EventRow } from "../lib/api";
+import { Link, useSearchParams } from "react-router-dom";
+import { useMemo, useState } from "react";
+import { Camera, EventRow, Site } from "../lib/api";
 import { CameraTile } from "../components/CameraTile";
 
-type Props = { cameras: Camera[]; events: EventRow[]; hidden?: boolean };
+type Props = { cameras: Camera[]; events: EventRow[]; sites: Site[]; isAdmin: boolean };
 
-export function Dashboard({ cameras, events, hidden = false }: Props) {
-  // Stay mounted when hidden so WebRTC tiles keep streaming between routes.
-  return (
-    <main className="flex-1 overflow-auto p-4 md:p-6 bg-verkada-canvas" style={hidden ? { display: "none" } : undefined}>
-      <section className="flex items-end justify-between gap-4 mb-3 max-w-7xl mx-auto">
-        <div>
-          <p className="text-xs font-medium text-blue-400 uppercase tracking-wider mb-1">Live monitoring</p>
-          <h2 className="text-3xl font-bold text-theme m-0">Camera Dashboard</h2>
-        </div>
+export function Dashboard({ cameras, events, sites, isAdmin }: Props) {
+  const [params] = useSearchParams();
+  const [query, setQuery] = useState("");
+  const selected = params.get("site");
+  const groups = useMemo(() => {
+    const nextGroups = sites.map(site => ({ ...site, cameras: cameras.filter(camera => camera.site_id === site.id) }));
+    const unassigned = cameras.filter(camera => !camera.site_id || !sites.some(site => site.id === camera.site_id));
+    if (unassigned.length) nextGroups.push({ id: "unassigned", name: "Other cameras", starred: false, cameras: unassigned });
+    return nextGroups;
+  }, [cameras, sites]);
+  const visible = useMemo(() => {
+    const selectedGroups = selected ? groups.filter(site => site.id === selected) : groups;
+    const needle = query.trim().toLowerCase();
+    if (!needle) return selectedGroups;
+    return selectedGroups
+      .map(site => ({
+        ...site,
+        cameras: site.name.toLowerCase().includes(needle)
+          ? site.cameras
+          : site.cameras.filter(camera => camera.name.toLowerCase().includes(needle) || camera.id.toLowerCase().includes(needle)),
+      }))
+      .filter(site => site.name.toLowerCase().includes(needle) || site.cameras.length > 0);
+  }, [groups, query, selected]);
+  const visibleCameraCount = visible.reduce((count, site) => count + site.cameras.length, 0);
 
-        <div className="grid grid-cols-3 gap-2" aria-label="Camera status summary">
-          <div className="bg-verkada-card border border-verkada-border rounded-lg p-3.5 flex flex-col justify-between shadow-sm">
-            <strong className="text-xl font-bold font-mono text-theme">{cameras.length}</strong>
-            <span className="text-xs font-medium text-theme-muted uppercase tracking-wider">Total cameras</span>
-          </div>
-          <div className="bg-verkada-card border border-verkada-border rounded-lg p-3.5 flex flex-col justify-between shadow-sm">
-            <strong className="text-xl font-bold font-mono text-theme">{cameras.filter((c) => c.detect).length}</strong>
-            <span className="text-xs font-medium text-theme-muted uppercase tracking-wider">AI enabled</span>
-          </div>
-          <div className="bg-verkada-card border border-verkada-border rounded-lg p-3.5 flex flex-col justify-between shadow-sm">
-            <strong className="text-xl font-bold font-mono text-theme">{cameras.filter((c) => c.recording_enabled).length}</strong>
-            <span className="text-xs font-medium text-theme-muted uppercase tracking-wider">Recording</span>
-          </div>
-        </div>
-      </section>
-
-      <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 xl:grid-cols-4 gap-4 max-w-7xl mx-auto">
-        {cameras.length === 0 ? (
-          <div className="col-span-full text-center py-12 text-theme-muted">No cameras configured. Add cameras from the Cameras page.</div>
-        ) : (
-          cameras.map((camera) => <CameraTile key={camera.id} camera={camera} events={events} />)
-        )}
+  return <main className="page">
+    <div className="dashboard-workspace">
+      <div className="dashboard-search-row">
+        <label className="dashboard-search">
+          <span aria-hidden>⌕</span>
+          <input
+            value={query}
+            onChange={(event) => setQuery(event.target.value)}
+            placeholder="Search..."
+            aria-label="Search sites and cameras"
+          />
+          {query && <button type="button" onClick={() => setQuery("")} aria-label="Clear search">×</button>}
+        </label>
       </div>
-    </main>
-  );
+
+      <div className="dashboard-heading">
+        <div>
+          <p>Live monitoring</p>
+          <h1>{selected ? groups.find(site => site.id === selected)?.name || "Location unavailable" : "All sites"}</h1>
+          <span>{visible.length} locations · {visibleCameraCount} cameras</span>
+        </div>
+        {isAdmin && <Link className="dashboard-action" to={selected && selected !== "unassigned" ? `/cameras?site=${encodeURIComponent(selected)}` : "/cameras"}>{selected ? "Manage cameras" : "Add location"}</Link>}
+      </div>
+      {!groups.length && <div className="empty">No locations yet. {isAdmin ? "Add a location, then connect your cameras." : "Your administrator can add locations and cameras."}</div>}
+      {selected && !groups.some(site => site.id === selected) && <div className="empty">This location is unavailable. <Link to="/">View all sites</Link></div>}
+      {groups.length > 0 && !visible.length && <div className="empty">No cameras or sites match your search.</div>}
+      <div className={`site-camera-groups ${selected ? "single-site" : ""}`}>
+        {visible.map(site => <section key={site.id} className="site-camera-group">
+          <div className="site-group-header">
+            <Link className="site-title" to={`/?site=${encodeURIComponent(site.id)}`}>{site.starred && <span className="site-star">★</span>}{site.name}</Link>
+            <span className="site-count">{site.cameras.length}</span>
+            <span className="site-header-spacer" />
+            {isAdmin && site.id !== "unassigned" && <Link className="site-menu-button" aria-label={`Manage ${site.name}`} to={`/cameras?site=${encodeURIComponent(site.id)}`}>Manage</Link>}
+            <button className="site-more-button" type="button" aria-label={`${site.name} actions`}>...</button>
+          </div>
+          <div className="site-camera-grid">{site.cameras.map(camera => <CameraTile key={camera.id} camera={camera} events={events} />)}</div>
+          {!site.cameras.length && <div className="empty">No cameras at this location.{isAdmin && <Link className="btn mt-3" to={`/cameras?site=${encodeURIComponent(site.id)}`}>+ Add cameras</Link>}</div>}
+        </section>)}
+      </div>
+    </div>
+  </main>;
 }

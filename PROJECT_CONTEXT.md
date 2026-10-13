@@ -256,3 +256,34 @@ Before production: set a strong dashboard password, terminate TLS at a reverse p
 - Stream behavior: inspect `backend/app/services/mediamtx.py`, `mediamtx/`, and `frontend/src/lib/whep.ts`.
 
 Always validate the touched slice first, then run a broader Docker or frontend build when the change crosses service boundaries.
+
+## Locations and site navigation
+
+Cameras now belong to persisted `sites` (`id`, `name`, `starred`). Administrators
+create locations from **Locations**, open **Manage cameras**, then add cameras.
+The camera edit form can move a camera to another location. Site deletion rejects
+nonempty sites. `POST /api/cameras` requires a valid `site_id`; updates that omit
+it preserve the current assignment. Sites use authenticated `GET /api/sites`
+and administrator-only `POST`, `PUT /{id}`, and `DELETE /{id}` endpoints.
+
+Startup adds the nullable SQLite camera `site_id` foreign key and assigns legacy
+cameras to **Existing cameras** once. Existing streams and credentials are retained.
+The virtual demo camera appears under **Other cameras**. The sidebar supports
+site search, starred sites, hover/focus expansion, and a locally persisted pin.
+The dashboard groups live tiles by site; selecting a site uses `/?site=<id>`.
+
+Validate the site migration/API logic in isolation:
+`docker compose run --rm --no-deps -e DATABASE_URL=sqlite:////tmp/site-test.db backend python -m unittest discover -s tests -p test_sites.py -v`.
+
+Detection screenshots now link to `/recordings?camera=<id>&at=<ISO timestamp>`.
+The authenticated `/api/recordings/at` endpoint resolves the recording using the
+configured recording timezone, checks the previous day for midnight-spanning
+clips, and uses ffprobe to verify the actual playable duration. Missing, unfinished,
+or expired footage returns a recoverable 404 instead of choosing unrelated video.
+The player seeks on metadata load and ignores stale requests when filters change.
+Unique detection images use their last-seen event; individual snapshots use their
+own event time. The event-detail modal retains its metadata and adds a playback link.
+
+The sidebar uses a consistent SVG icon rail, grouped workspace/management links,
+a searchable site list, and a persisted pin. Navigation remains accessible while
+collapsed. Recording regression tests are in `tests/test_recording_navigation.py`.

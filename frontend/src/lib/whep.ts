@@ -16,15 +16,60 @@ export async function startWhep(
   video: HTMLVideoElement,
   onStateChange?: (state: WhepState) => void,
 ): Promise<WhepHandle> {
+  let live = false;
+  let visualTimer: ReturnType<typeof setTimeout> | null = null;
+  let frameCallbackId: number | null = null;
+
   const pc = new RTCPeerConnection({
     iceServers: [{ urls: "stun:stun.l.google.com:19302" }],
   });
 
   onStateChange?.("connecting");
 
+  const clearVisualWatch = () => {
+    if (visualTimer) {
+      clearTimeout(visualTimer);
+      visualTimer = null;
+    }
+    if (frameCallbackId != null && "cancelVideoFrameCallback" in video) {
+      video.cancelVideoFrameCallback(frameCallbackId);
+      frameCallbackId = null;
+    }
+    video.removeEventListener("loadeddata", markLiveIfReady);
+    video.removeEventListener("canplay", markLiveIfReady);
+  };
+
+  const markLiveIfReady = () => {
+    if (live) return;
+    if (video.videoWidth <= 0 || video.videoHeight <= 0 || video.readyState < HTMLMediaElement.HAVE_CURRENT_DATA) {
+      return;
+    }
+    live = true;
+    clearVisualWatch();
+    onStateChange?.("live");
+  };
+
+  const armVisualWatch = () => {
+    clearVisualWatch();
+    video.addEventListener("loadeddata", markLiveIfReady);
+    video.addEventListener("canplay", markLiveIfReady);
+
+    if ("requestVideoFrameCallback" in video) {
+      frameCallbackId = video.requestVideoFrameCallback(() => {
+        frameCallbackId = null;
+        markLiveIfReady();
+      });
+    }
+
+    visualTimer = setTimeout(() => {
+      markLiveIfReady();
+      if (!live) onStateChange?.("error");
+    }, 10000);
+  };
+
   pc.onconnectionstatechange = () => {
     if (pc.connectionState === "connected") {
-      onStateChange?.("live");
+      markLiveIfReady();
     } else if (
       pc.connectionState === "failed" ||
       pc.connectionState === "disconnected"
@@ -40,7 +85,8 @@ export async function startWhep(
       video.srcObject = ev.streams[0];
     }
     video.play().catch(() => {});
-    onStateChange?.("live");
+    armVisualWatch();
+    markLiveIfReady();
   };
 
   const offer = await pc.createOffer();
@@ -66,7 +112,7 @@ export async function startWhep(
       if (pc.iceGatheringState === "complete") finish();
     };
     pc.addEventListener("icegatheringstatechange", check);
-    timer = setTimeout(finish, 1500);
+    timer = setTimeout(finish, 350);
   });
 
   const url = `${mediamtxUrl.replace(/\/$/, "")}/${path}/whep`;
@@ -92,6 +138,8 @@ export async function startWhep(
           await fetch(del, { method: "DELETE" }).catch(() => {});
         }
       } finally {
+        clearVisualWatch();
+        if (video.srcObject) video.srcObject = null;
         pc.close();
       }
     },

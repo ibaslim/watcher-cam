@@ -1,4 +1,5 @@
 import { useEffect, useState } from "react";
+import { Link } from "react-router-dom";
 import {
     API_URL,
     Camera,
@@ -10,6 +11,7 @@ import {
     fetchCameras,
     fetchReportEvents,
     fetchReportSummary,
+    recordingLink,
 } from "../lib/api";
 import { formatPortalDateTime, PORTAL_TIME_ZONE_LABEL } from "../lib/time";
 
@@ -22,6 +24,7 @@ export function Reports() {
   const [loading, setLoading] = useState(false);
   const [err, setErr] = useState<string | null>(null);
   const [selectedIds, setSelectedIds] = useState<number[]>([]);
+  const [selectedEvent, setSelectedEvent] = useState<EventRow | null>(null);
   const [deleting, setDeleting] = useState(false);
   const [page, setPage] = useState(1);
 
@@ -336,9 +339,14 @@ export function Reports() {
                     </td>
                     <td>
                       {e.snapshot_url ? (
-                        <a href={`${API_URL}${e.snapshot_url}`} target="_blank" rel="noreferrer">
+                        <button
+                          type="button"
+                          onClick={() => setSelectedEvent(e)}
+                          className="font-medium text-blue-400 hover:text-blue-300 underline"
+                          title="Expand screenshot"
+                        >
                           View
-                        </a>
+                        </button>
                       ) : (
                         "—"
                       )}
@@ -371,6 +379,85 @@ export function Reports() {
           </div>
         )}
       </div>
+
+      {selectedEvent && (
+        <div className="modal-overlay" onClick={() => setSelectedEvent(null)}>
+          <div className="modal event-modal" onClick={(event) => event.stopPropagation()}>
+            <div className="event-modal-head">
+              <span className="ev-type font-semibold text-theme">
+                {selectedEvent.label || selectedEvent.event_type.replace(/_/g, " ")}
+              </span>
+
+              <button className="modal-close" onClick={() => setSelectedEvent(null)} aria-label="Close">
+                x
+              </button>
+            </div>
+
+            <div className="event-modal-img">
+              {selectedEvent.snapshot_url ? (
+                <Link
+                  to={recordingLink(selectedEvent.camera_id, selectedEvent.created_at, selectedEvent.id)}
+                  aria-label="Play recording at this detection"
+                  title="Click image to play video footage at this detection time"
+                  className="group relative block w-full h-full cursor-pointer overflow-hidden"
+                >
+                  <img
+                    src={`${API_URL}${selectedEvent.snapshot_url}`}
+                    alt="event snapshot"
+                    width={640}
+                    height={360}
+                    className="w-full h-full object-contain transition-transform duration-200 group-hover:scale-[1.02]"
+                  />
+                  <div className="absolute inset-0 flex items-center justify-center bg-black/40 opacity-0 transition-opacity duration-200 group-hover:opacity-100">
+                    <span className="flex items-center gap-2 rounded-full bg-blue-600/90 px-4 py-2 text-xs font-semibold text-white shadow-lg backdrop-blur-sm">
+                      ▶ Play Video Footage
+                    </span>
+                  </div>
+                </Link>
+              ) : (
+                <div className="event-modal-noimg">
+                  <span>No snapshot for this event</span>
+                </div>
+              )}
+            </div>
+
+            <Link className="btn primary mb-4" to={recordingLink(selectedEvent.camera_id, selectedEvent.created_at, selectedEvent.id)}>
+              Play recording at this time ↗
+            </Link>
+
+            <dl className="event-detail-grid">
+              <div className="event-detail-item">
+                <dt>Event</dt>
+                <dd>{selectedEvent.event_type}</dd>
+              </div>
+              <div className="event-detail-item">
+                <dt>Camera</dt>
+                <dd>{selectedEvent.camera_id}</dd>
+              </div>
+              {selectedEvent.confidence != null && (
+                <div className="event-detail-item">
+                  <dt>Detection confidence</dt>
+                  <dd>{(selectedEvent.confidence * 100).toFixed(1)}%</dd>
+                </div>
+              )}
+              {selectedEvent.label && (
+                <div className="event-detail-item">
+                  <dt>Detected object</dt>
+                  <dd>{selectedEvent.label}</dd>
+                </div>
+              )}
+              <div className="event-detail-item">
+                <dt>Source</dt>
+                <dd>{selectedEvent.source}</dd>
+              </div>
+              <div className="event-detail-item">
+                <dt>Time</dt>
+                <dd>{formatPortalDateTime(selectedEvent.created_at)} {PORTAL_TIME_ZONE_LABEL}</dd>
+              </div>
+            </dl>
+          </div>
+        </div>
+      )}
     </main>
   );
 }

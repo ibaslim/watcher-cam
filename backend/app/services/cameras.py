@@ -25,6 +25,7 @@ _DEMO_WEBCAM = CameraConfig(
 def _to_config(row: Camera) -> CameraConfig:
     return CameraConfig(
         id=row.id,
+        site_id=row.site_id,
         name=row.name,
         host=row.host,
         rtsp_port=row.rtsp_port,

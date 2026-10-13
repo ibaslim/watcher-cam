@@ -38,6 +38,7 @@ class CameraConfig(BaseModel):
     rtsp_url_override: str = ""
     recorder_id: str = ""
     recorder_name: str = ""
+    site_id: str | None = None
 
     @property
     def rtsp_url(self) -> str:
@@ -77,6 +78,8 @@ class Settings(BaseSettings):
 
     mediamtx_api_host: str = "host.docker.internal"
     mediamtx_api_port: int = 9997
+    mediamtx_rtsp_host: str = "mediamtx"
+    mediamtx_rtsp_port: int = 8554
     mediamtx_webrtc_port: int = 8889
     mediamtx_hls_port: int = 8888
 
@@ -99,7 +102,7 @@ class Settings(BaseSettings):
     snapshot_retention_days: int = 30
     recording_dir: str = "./data/recordings"
     recording_retention_days: int = 30
-    recording_segment_seconds: int = 300
+    recording_segment_seconds: int = 600
     recording_enabled: bool = True
 
     # Shared-password gate for the whole API + dashboard. Leave blank to
@@ -125,6 +128,9 @@ class Settings(BaseSettings):
     @property
     def mediamtx_api_url(self) -> str:
         return f"http://{self.mediamtx_api_host}:{self.mediamtx_api_port}"
+
+    def mediamtx_rtsp_url(self, path: str) -> str:
+        return f"rtsp://{self.mediamtx_rtsp_host}:{self.mediamtx_rtsp_port}/{quote(path, safe='')}"
 
     @property
     def cors_origin_list(self) -> list[str]:

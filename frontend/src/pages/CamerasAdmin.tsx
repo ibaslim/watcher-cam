@@ -2,6 +2,7 @@ import { FormEvent, useEffect, useState } from "react";
 import { InfoTip } from "../components/InfoTip";
 import {
   Camera,
+  Site,
   CameraInput,
   createCamera,
   deleteCamera,
@@ -11,6 +12,7 @@ import {
 } from "../lib/api";
 
 const EMPTY: CameraInput = {
+  site_id: "",
   id: "",
   name: "",
   host: "",
@@ -24,16 +26,17 @@ const EMPTY: CameraInput = {
   rtsp_url_override: "",
 };
 
-export function CamerasAdmin({ onCamerasChanged }: { onCamerasChanged?: () => void }) {
+export function CamerasAdmin({ onCamerasChanged, site, sites }: { onCamerasChanged?: () => void; site: Site; sites: Site[] }) {
   const [cameras, setCameras] = useState<Camera[]>([]);
   const [editing, setEditing] = useState<CameraInput | null>(null);
   const [editingExistingId, setEditingExistingId] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
+  const [saving, setSaving] = useState(false);
   const [warning, setWarning] = useState<string | null>(null);
   const [expandedRecorders, setExpandedRecorders] = useState<Record<string, boolean>>({});
   const [bulkUpdatingRecorderId, setBulkUpdatingRecorderId] = useState<string | null>(null);
 
-  const reload = () => fetchCameras().then(setCameras).catch(() => setCameras([]));
+  const reload = () => fetchCameras().then(rows => setCameras(rows.filter(c => c.site_id === site.id))).catch(e => setError((e as Error).message));
 
   useEffect(() => {
     reload();
@@ -43,7 +46,7 @@ export function CamerasAdmin({ onCamerasChanged }: { onCamerasChanged?: () => vo
     setError(null);
     setWarning(null);
     setEditingExistingId(null);
-    setEditing({ ...EMPTY });
+    setEditing({ ...EMPTY, site_id: site.id });
   };
 
   const onEdit = (c: Camera) => {
@@ -51,6 +54,7 @@ export function CamerasAdmin({ onCamerasChanged }: { onCamerasChanged?: () => vo
     setWarning(null);
     setEditingExistingId(c.id);
     setEditing({
+      site_id: c.site_id || site.id,
       id: c.id,
       name: c.name,
       host: c.host ?? "",
@@ -78,7 +82,7 @@ export function CamerasAdmin({ onCamerasChanged }: { onCamerasChanged?: () => vo
   };
 
   const onDeleteRecorder = async (recorderId: string, recorderName: string, count: number) => {
-    if (!confirm(`Delete NVR/DVR "${recorderName}" and all ${count} camera(s) under it?`)) return;
+    if (!confirm(`Delete NVR/DVR "${recorderName}" and ALL its cameras across every location? ${count} are in this location.`)) return;
 
     try {
       await deleteRecorder(recorderId);
@@ -90,6 +94,7 @@ export function CamerasAdmin({ onCamerasChanged }: { onCamerasChanged?: () => vo
   };
 
   const toCameraUpdate = (camera: Camera, changes: Partial<Pick<CameraInput, "detect" | "recording_enabled">>): Omit<CameraInput, "id"> => ({
+    site_id: camera.site_id || site.id,
     name: camera.name,
     host: camera.host ?? "",
     rtsp_port: camera.rtsp_port ?? 554,
@@ -140,7 +145,8 @@ export function CamerasAdmin({ onCamerasChanged }: { onCamerasChanged?: () => vo
 
   const onSubmit = async (e: FormEvent) => {
     e.preventDefault();
-    if (!editing) return;
+    if (!editing || saving) return;
+    setSaving(true);
     setError(null);
     setWarning(null);
 
@@ -161,6 +167,8 @@ export function CamerasAdmin({ onCamerasChanged }: { onCamerasChanged?: () => vo
       if (saved.stream_warning) setWarning(saved.stream_warning);
     } catch (err) {
       setError((err as Error).message);
+    } finally {
+      setSaving(false);
     }
   };
 
@@ -193,7 +201,7 @@ export function CamerasAdmin({ onCamerasChanged }: { onCamerasChanged?: () => vo
     <main className="page">
       <div className="page-inner">
         <div className="flex items-center justify-between mb-4">
-          <h2 className="page-title !m-0">Cameras</h2>
+          <h2 className="page-title !m-0">{site.name}</h2>
           <div className="flex gap-2">
             <button className="btn primary" onClick={onNew} data-tour="add-camera">+ Add camera</button>
           </div>
@@ -275,6 +283,9 @@ export function CamerasAdmin({ onCamerasChanged }: { onCamerasChanged?: () => vo
 
         {editing && (
           <CameraForm
+            saving={saving}
+            sites={sites}
+            error={error}
             value={editing}
             onChange={setEditing}
             isEdit={editingExistingId !== null}
@@ -341,6 +352,9 @@ function CameraTable(props: {
 }
 
 function CameraForm(props: {
+  saving: boolean;
+  sites: Site[];
+  error: string | null;
   value: CameraInput;
   onChange: (v: CameraInput) => void;
   isEdit: boolean;
@@ -355,7 +369,12 @@ function CameraForm(props: {
       <form onSubmit={onSubmit} data-tour="cam-form" className="modal max-w-[560px]">
         <h3>{isEdit ? `Edit ${value.id}` : "Add camera"}</h3>
 
+        {props.error && <div role="alert" className="alert alert-error mb-3">{props.error}</div>}
         <div className="form-grid">
+          <label htmlFor="camera-site">Location</label>
+          <select id="camera-site" className="input" required value={value.site_id} onChange={e => set("site_id", e.target.value)}>
+            {props.sites.map(site => <option key={site.id} value={site.id}>{site.name}</option>)}
+          </select>
           <label>ID</label>
           <input className="input" type="text" value={value.id} disabled={isEdit} required pattern="[A-Za-z0-9_-]+" placeholder="e.g. gate-1" onChange={(e) => set("id", e.target.value)} />
 
@@ -391,8 +410,8 @@ function CameraForm(props: {
         </div>
 
         <div className="mt-4 flex gap-2 justify-end">
-          <button type="button" className="btn" onClick={onCancel}>Cancel</button>
-          <button type="submit" className="btn primary">{isEdit ? "Save" : "Add"}</button>
+          <button type="button" className="btn" disabled={props.saving} onClick={onCancel}>Cancel</button>
+          <button type="submit" className="btn primary" disabled={props.saving}>{props.saving ? "Saving…" : isEdit ? "Save" : "Add"}</button>
         </div>
       </form>
     </Modal>

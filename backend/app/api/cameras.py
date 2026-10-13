@@ -11,7 +11,7 @@ from sqlalchemy.orm import Session
 from app.api import auth
 from app.config import CameraConfig, get_settings
 from app.db import get_db
-from app.models import Camera, User
+from app.models import Camera, Site, User
 from app.services import mediamtx
 from app.services.cameras import list_cameras
 
@@ -37,6 +37,7 @@ def _camera_view(c: CameraConfig) -> dict:
 
     return {
         "id": c.id,
+        "site_id": c.site_id,
         "name": c.name,
         "host": c.host,
         "rtsp_port": c.rtsp_port,
@@ -75,6 +76,7 @@ def list_all_internal(db: Annotated[Session, Depends(get_db)]) -> list[dict]:
 
 
 class CameraIn(BaseModel):
+    site_id: str = Field(min_length=1, max_length=64)
     id: str = Field(min_length=1, max_length=64, pattern=r"^[A-Za-z0-9_-]+$")
     name: str = Field(min_length=1, max_length=128)
     host: str = ""
@@ -89,6 +91,7 @@ class CameraIn(BaseModel):
 
 
 class CameraUpdate(BaseModel):
+    site_id: str | None = Field(default=None, min_length=1, max_length=64)
     name: str = Field(min_length=1, max_length=128)
     host: str = ""
     rtsp_port: int = Field(554, ge=1, le=65535)
@@ -112,6 +115,9 @@ async def create_camera(
 
     if db.get(Camera, payload.id) is not None:
         raise HTTPException(409, f"camera id '{payload.id}' already exists")
+
+    if db.get(Site, payload.site_id) is None:
+        raise HTTPException(404, "site not found")
 
     row = Camera(**payload.model_dump())
     db.add(row)
@@ -176,6 +182,11 @@ async def update_camera(
     if row is None:
         raise HTTPException(404, "camera not found")
 
+    if payload.site_id is not None:
+        if db.get(Site, payload.site_id) is None:
+            raise HTTPException(404, "site not found")
+        row.site_id = payload.site_id
+
     row.name = payload.name
     row.host = payload.host
     row.rtsp_port = payload.rtsp_port
@@ -195,6 +206,7 @@ async def update_camera(
 
     cam = CameraConfig(
         id=row.id,
+        site_id=row.site_id,
         name=row.name,
         host=row.host,
         rtsp_port=row.rtsp_port,
