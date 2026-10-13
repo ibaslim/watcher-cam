@@ -1,4 +1,5 @@
-from detector.worker import _VehicleAlertSuppressor, _should_emit_classification
+from detector.object_detection import ObjectDetection
+from detector.worker import _VehicleAlertSuppressor, _should_emit_classification, _with_rider_interest_detections
 
 
 def test_person_crop_without_fingerprint_is_still_emitted() -> None:
@@ -60,3 +61,43 @@ def test_vehicle_alert_suppressor_does_not_affect_people() -> None:
     suppressor.remember(kind="person", bbox=(100, 100, 180, 240), now=10)
 
     assert suppressor.should_suppress(kind="person", bbox=(102, 100, 182, 240), now=120) is False
+
+
+def test_motorcycle_detection_also_counts_as_person_interest() -> None:
+    detections = [
+        ObjectDetection(
+            bbox=(100, 100, 320, 260),
+            confidence=0.82,
+            label="motorcycle",
+            category="vehicle",
+        )
+    ]
+
+    augmented = _with_rider_interest_detections(detections)
+
+    assert [(item.category, item.label) for item in augmented] == [
+        ("vehicle", "motorcycle"),
+        ("person", "person"),
+    ]
+    assert augmented[1].bbox == detections[0].bbox
+
+
+def test_motorcycle_detection_does_not_duplicate_existing_person() -> None:
+    detections = [
+        ObjectDetection(
+            bbox=(100, 100, 320, 260),
+            confidence=0.82,
+            label="motorcycle",
+            category="vehicle",
+        ),
+        ObjectDetection(
+            bbox=(145, 70, 230, 230),
+            confidence=0.77,
+            label="person",
+            category="person",
+        ),
+    ]
+
+    augmented = _with_rider_interest_detections(detections)
+
+    assert augmented == detections

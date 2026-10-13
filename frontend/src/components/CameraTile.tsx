@@ -7,12 +7,34 @@ type Props = { camera: Camera; events: EventRow[] };
 
 export function CameraTile({ camera, events }: Props) {
   const videoRef = useRef<HTMLVideoElement>(null);
+  const tileRef = useRef<HTMLDivElement>(null);
   const navigate = useNavigate();
 
   const [status, setStatus] = useState<"connecting" | "live" | "error">("connecting");
   const [latestEvent, setLatestEvent] = useState<EventRow | null>(null);
+  const [visible, setVisible] = useState(false);
 
   useEffect(() => {
+    const node = tileRef.current;
+    if (!node || typeof IntersectionObserver === "undefined") {
+      setVisible(true);
+      return;
+    }
+
+    const observer = new IntersectionObserver((entries) => {
+      setVisible(entries.some((entry) => entry.isIntersecting));
+    }, { rootMargin: "260px 0px" });
+
+    observer.observe(node);
+    return () => observer.disconnect();
+  }, []);
+
+  useEffect(() => {
+    if (!visible) {
+      setStatus("connecting");
+      return;
+    }
+
     if (!videoRef.current) {
       setStatus("connecting");
       return;
@@ -74,7 +96,7 @@ export function CameraTile({ camera, events }: Props) {
       if (connectTimer) clearTimeout(connectTimer);
       handle?.stop();
     };
-  }, [camera.id]);
+  }, [camera.id, visible]);
 
   const cameraEvents = events
     .filter((event) => event.camera_id === camera.id)
@@ -90,6 +112,7 @@ export function CameraTile({ camera, events }: Props) {
 
   return (
     <div
+      ref={tileRef}
       className={`camera-tile ${status === "error" ? "is-offline" : ""}`}
       onClick={() => navigate(`/cameras/${camera.id}`)}
       role="link"

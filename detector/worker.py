@@ -24,7 +24,7 @@ import numpy as np
 
 from detector.config import CameraConfig, get_settings
 from detector.face import analyze
-from detector.object_detection import detect_objects
+from detector.object_detection import ObjectDetection, detect_objects
 
 log = logging.getLogger(__name__)
 
@@ -139,6 +139,75 @@ def _iou(a: tuple[int, int, int, int], b: tuple[int, int, int, int]) -> float:
     area_b = max(0, bx2 - bx1) * max(0, by2 - by1)
     union = area_a + area_b - inter
     return inter / union if union > 0 else 0.0
+
+
+def _box_area(bbox: tuple[int, int, int, int]) -> float:
+    x1, y1, x2, y2 = bbox
+    return float(max(0, x2 - x1) * max(0, y2 - y1))
+
+
+def _intersection_ratio(inner: tuple[int, int, int, int], outer: tuple[int, int, int, int]) -> float:
+    ix1 = max(inner[0], outer[0])
+    iy1 = max(inner[1], outer[1])
+    ix2 = min(inner[2], outer[2])
+    iy2 = min(inner[3], outer[3])
+    inter = max(0, ix2 - ix1) * max(0, iy2 - iy1)
+    area = _box_area(inner)
+    return inter / area if area > 0 else 0.0
+
+
+def _is_motorcycle_label(label: str) -> bool:
+    return label.strip().lower() in {"motorcycle", "motorbike"}
+
+
+def _has_person_for_motorcycle(
+    motorcycle: ObjectDetection,
+    detections: list[ObjectDetection],
+) -> bool:
+    for detection in detections:
+        if detection.category != "person":
+            continue
+
+        if _center_inside(detection.bbox, motorcycle.bbox):
+            return True
+
+        if _iou(detection.bbox, motorcycle.bbox) >= 0.08:
+            return True
+
+        if _intersection_ratio(detection.bbox, motorcycle.bbox) >= 0.20:
+            return True
+
+    return False
+
+
+def _with_rider_interest_detections(detections: list[ObjectDetection]) -> list[ObjectDetection]:
+    """Treat a detected motorcycle as both vehicle and rider/person evidence.
+
+    COCO-style detectors sometimes classify a rider and motorcycle together as
+    only "motorcycle". For alerting and evidence filters, the scene still has a
+    person of interest, so add a synthetic person detection unless YOLO already
+    found an overlapping person.
+    """
+
+    augmented = list(detections)
+
+    for detection in detections:
+        if detection.category != "vehicle" or not _is_motorcycle_label(detection.label):
+            continue
+
+        if _has_person_for_motorcycle(detection, augmented):
+            continue
+
+        augmented.append(
+            ObjectDetection(
+                bbox=detection.bbox,
+                confidence=detection.confidence,
+                label="person",
+                category="person",
+            )
+        )
+
+    return augmented
 
 
 def _scale_bbox(
@@ -714,6 +783,7 @@ async def _run_once(cam: CameraConfig) -> None:
                     for obj in await asyncio.to_thread(detect_objects, frame)
                     if obj.category in {"person", "vehicle", "animal"}
                 ]
+                objects = _with_rider_interest_detections(objects)
                 alert_candidates: list[_AlertCandidate] = []
                 vehicle_candidates_to_remember: list[_AlertCandidate] = []
 

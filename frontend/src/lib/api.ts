@@ -245,6 +245,7 @@ export type EventFilters = {
   date_to?: string;
   camera_id?: string;
   entity_id?: string;
+  event_type?: string;
 };
 
 export const fetchEvents = (filters: EventFilters = {}) => {
@@ -255,6 +256,7 @@ export const fetchEvents = (filters: EventFilters = {}) => {
   if (filters.date_to) p.set("date_to", filters.date_to);
   if (filters.camera_id) p.set("camera_id", filters.camera_id);
   if (filters.entity_id) p.set("entity_id", filters.entity_id);
+  if (filters.event_type) p.set("event_type", filters.event_type);
 
   return fetch(`${API_URL}/api/events?${p.toString()}`, authed()).then((r) => ok<EventRow[]>(r));
 };

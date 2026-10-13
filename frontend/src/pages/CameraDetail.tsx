@@ -21,6 +21,13 @@ type EvidenceFilter = "all" | "person" | "vehicle" | "animal";
 
 const EVENT_PAGE_SIZE = 24;
 
+function eventTypeForFilter(filter: EvidenceFilter): string | undefined {
+  if (filter === "person") return "person_detected";
+  if (filter === "vehicle") return "vehicle_detected";
+  if (filter === "animal") return "animal_detected";
+  return undefined;
+}
+
 function fullViewRecordingLink(cameraId: string, at: string, eventId?: number, returnTo?: string): string {
   const url = recordingLink(cameraId, at, eventId, returnTo);
   return url.replace("/recordings?", "/recordings/player?");
@@ -34,6 +41,7 @@ export function CameraDetail({ cameras, sites, isAdmin }: Props) {
   const loadMoreRef = useRef<HTMLDivElement>(null);
   const mountedRef = useRef(true);
   const loadingPageRef = useRef(false);
+  const loadKeyRef = useRef(0);
   const evidenceRefreshTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
 
   const [status, setStatus] = useState<"connecting" | "live" | "error">("connecting");
@@ -131,31 +139,35 @@ export function CameraDetail({ cameras, sites, isAdmin }: Props) {
     if (!camera) return;
     if (loadingPageRef.current) return;
     loadingPageRef.current = true;
+    const loadKey = ++loadKeyRef.current;
     if (mode === "append") setLoadingMoreEvents(true);
     else setLoadingEvents(true);
 
     try {
       const rows = await fetchEvents({
         camera_id: camera.id,
+        event_type: eventTypeForFilter(eventFilter),
         limit: EVENT_PAGE_SIZE,
         offset,
       });
 
-      if (!mountedRef.current) return;
+      if (!mountedRef.current || loadKey !== loadKeyRef.current) return;
 
       setHasMoreEvents(rows.length === EVENT_PAGE_SIZE);
       setEventOffset(offset + rows.length);
       setEvents((current) => mode === "append" ? mergeEvents(current, rows) : rows);
     } finally {
-      loadingPageRef.current = false;
-      if (mountedRef.current) {
+      if (loadKey === loadKeyRef.current) loadingPageRef.current = false;
+      if (mountedRef.current && loadKey === loadKeyRef.current) {
         setLoadingEvents(false);
         setLoadingMoreEvents(false);
       }
     }
-  }, [camera?.id, mergeEvents]);
+  }, [camera?.id, eventFilter, mergeEvents]);
 
   const refreshEvidence = useCallback(async () => {
+    loadKeyRef.current += 1;
+    loadingPageRef.current = false;
     setHasMoreEvents(true);
     setEventOffset(0);
     await loadEventsPage(0, "replace");
@@ -180,26 +192,33 @@ export function CameraDetail({ cameras, sites, isAdmin }: Props) {
   useEffect(() => {
     if (!camera) return;
     void refreshEvidence();
-  }, [camera?.id, refreshEvidence]);
+  }, [camera?.id, eventFilter, refreshEvidence]);
 
-  useEffect(() => {
+  const buildClassificationPreviews = useCallback(async () => {
     if (!camera) {
-      setClassificationPreviewByEntity({});
-      return;
+      return {};
     }
 
+    const rows = await fetchClassifications(camera.id, undefined, 500);
+    const next: Record<string, ClassificationRow> = {};
+    for (const row of rows) {
+      const previewUrl = row.crop_url || row.image_url;
+      if (row.entity_id && previewUrl && !next[row.entity_id]) {
+        next[row.entity_id] = row;
+      }
+    }
+    return next;
+  }, [camera?.id]);
+
+  const refreshClassificationPreviews = useCallback(async () => {
+    setClassificationPreviewByEntity(await buildClassificationPreviews());
+  }, [buildClassificationPreviews]);
+
+  useEffect(() => {
     let cancelled = false;
-    fetchClassifications(camera.id, undefined, 500)
-      .then((rows) => {
-        if (cancelled) return;
-        const next: Record<string, ClassificationRow> = {};
-        for (const row of rows) {
-          const previewUrl = row.crop_url || row.image_url;
-          if (row.entity_id && previewUrl && !next[row.entity_id]) {
-            next[row.entity_id] = row;
-          }
-        }
-        setClassificationPreviewByEntity(next);
+    buildClassificationPreviews()
+      .then((next) => {
+        if (!cancelled) setClassificationPreviewByEntity(next);
       })
       .catch(() => {
         if (!cancelled) setClassificationPreviewByEntity({});
@@ -208,15 +227,17 @@ export function CameraDetail({ cameras, sites, isAdmin }: Props) {
     return () => {
       cancelled = true;
     };
-  }, [camera?.id]);
+  }, [buildClassificationPreviews]);
 
   useEffect(() => {
     if (!camera) return;
 
     const disconnect = connectEvents((payload) => {
       if (payload.camera_id !== camera.id) return;
+      const payloadCategory = normalizeEvidenceCategory(payload.label || payload.event_type);
+      const matchesFilter = eventFilter === "all" || payloadCategory === eventFilter;
 
-      setEvents((prev) => {
+      if (matchesFilter) setEvents((prev) => {
         const nextEvent = {
           id: payload.id,
           entity_id: null,
@@ -237,18 +258,19 @@ export function CameraDetail({ cameras, sites, isAdmin }: Props) {
       }
       evidenceRefreshTimerRef.current = setTimeout(() => {
         evidenceRefreshTimerRef.current = null;
-        if (mountedRef.current) void refreshEvidence();
+        if (mountedRef.current) {
+          void refreshEvidence();
+          void refreshClassificationPreviews().catch(() => {});
+        }
       }, 750);
     });
 
     return () => {
       disconnect();
     };
-  }, [camera?.id, mergeEvents, refreshEvidence]);
+  }, [camera?.id, eventFilter, mergeEvents, normalizeEvidenceCategory, refreshClassificationPreviews, refreshEvidence]);
 
   useEffect(() => {
-    if (eventFilter !== "all") return;
-
     const node = loadMoreRef.current;
     if (!node) return;
 
@@ -260,7 +282,7 @@ export function CameraDetail({ cameras, sites, isAdmin }: Props) {
 
     observer.observe(node);
     return () => observer.disconnect();
-  }, [eventFilter, loadNextPage]);
+  }, [loadNextPage]);
 
   const filteredEvents = useMemo(() => {
     if (eventFilter === "all") return events;
@@ -468,7 +490,7 @@ function EventCard({
       >
         <span className="camera-event-media">
           {src ? (
-            <img src={src} alt="" loading="lazy" />
+            <SnapshotImage src={src} alt="" />
           ) : (
             <span>No snapshot available</span>
           )}
@@ -483,13 +505,23 @@ function EventCard({
         </span>
         {cropSrc ? (
           <span className="camera-event-object-preview" aria-hidden="true">
-            <img src={cropSrc} alt="" loading="lazy" />
+            <SnapshotImage src={cropSrc} alt="" compact />
             <span>{classificationPreview?.label || title}</span>
           </span>
         ) : null}
       </button>
     </article>
   );
+}
+
+function SnapshotImage({ src, alt, compact = false }: { src: string; alt: string; compact?: boolean }) {
+  const [failed, setFailed] = useState(false);
+
+  if (failed) {
+    return <span className={compact ? "camera-event-image-fallback compact" : "camera-event-image-fallback"}>Snapshot unavailable</span>;
+  }
+
+  return <img src={src} alt={alt} loading="lazy" onError={() => setFailed(true)} />;
 }
 
 type DetailIconName = "motion" | "history" | "person" | "vehicle" | "animal" | "archive" | "analytics" | "settings";
