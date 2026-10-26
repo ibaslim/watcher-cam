@@ -253,6 +253,35 @@ export function Recordings() {
   const [isDraggingVideo, setIsDraggingVideo] = useState(false);
 
   useEffect(() => {
+    if (!isPlaying || !selected) return;
+
+    let frameId = 0;
+    const tick = () => {
+      const video = videoRef.current;
+      if (!video || video.paused || video.ended) return;
+
+      const nextVideoTime = video.currentTime;
+      const nextTimelineSecond = clampTimelineSecond(selected.start_second + nextVideoTime);
+      if (playbackLimitSecond != null && nextTimelineSecond >= playbackLimitSecond) {
+        const limitedVideoTime = Math.max(0, playbackLimitSecond - selected.start_second);
+        video.pause();
+        video.currentTime = limitedVideoTime;
+        setVideoTime(limitedVideoTime);
+        setTimelineSecond(playbackLimitSecond);
+        setPlaybackLimitSecond(null);
+        return;
+      }
+
+      setVideoTime(nextVideoTime);
+      setTimelineSecond(nextTimelineSecond);
+      frameId = window.requestAnimationFrame(tick);
+    };
+
+    frameId = window.requestAnimationFrame(tick);
+    return () => window.cancelAnimationFrame(frameId);
+  }, [isPlaying, playbackLimitSecond, selected]);
+
+  useEffect(() => {
     let cancelled = false;
     fetchCameras().then(rows => { if (!cancelled) { setCameras(rows); setCameraError(""); } })
       .catch(() => { if (!cancelled) setCameraError("Could not load cameras. Please retry."); });
@@ -955,6 +984,7 @@ function Timeline({ day, value, onSeek }: { day: RecordingDay | null; value: num
           max={DAY_SECONDS - 1}
           step={1}
           value={Math.floor(value)}
+          onInput={(event) => onSeek(Number(event.currentTarget.value))}
           onChange={(event) => onSeek(Number(event.target.value))}
           aria-label="Recording timeline"
         />
