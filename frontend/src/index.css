@@ -1146,8 +1146,12 @@
     width: 100%;
     height: calc(100% - 16px);
     opacity: 0;
-    cursor: pointer;
-    z-index: 7;
+    cursor: grab;
+    z-index: 10;
+    touch-action: none;
+  }
+  .recording-track input:active {
+    cursor: grabbing;
   }
   .recording-coverage {
     position: absolute;
@@ -1250,19 +1254,34 @@
     width: 2px;
     background: #f8fafc;
     transform: translateX(-1px);
-    z-index: 6;
+    z-index: 9;
     box-shadow: 0 0 12px rgba(96,165,250,0.75);
+    pointer-events: none;
   }
   .recording-playhead::before {
     content: "";
     position: absolute;
-    top: -2px;
+    top: -4px;
     left: 50%;
-    width: 7px;
-    height: 7px;
+    width: 11px;
+    height: 11px;
     transform: translateX(-50%);
     border-radius: 999px;
     background: #eaf2ff;
+    box-shadow: 0 0 0 3px rgba(96,165,250,0.22), 0 0 16px rgba(96,165,250,0.70);
+  }
+  .recording-playhead::after {
+    content: "";
+    position: absolute;
+    left: 50%;
+    top: 39px;
+    width: 15px;
+    height: 15px;
+    transform: translate(-50%, -50%);
+    border: 2px solid #07101f;
+    border-radius: 999px;
+    background: #f8fafc;
+    box-shadow: 0 0 0 3px rgba(96,165,250,0.24), 0 6px 16px rgba(0,0,0,0.35);
   }
   .recording-timeline-labels {
     position: absolute;
